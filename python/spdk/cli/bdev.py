@@ -1110,6 +1110,53 @@ def add_parser(subparsers):
                    type=int)
     p.set_defaults(func=bdev_set_qos_limit)
 
+    def bdev_set_ai_qos_policy(args):
+        args.client.bdev_set_ai_qos_policy(
+                                        name=args.name,
+                                        enabled=args.enabled,
+                                        check_interval_us=args.check_interval_us)
+
+    p = subparsers.add_parser('bdev_set_ai_qos_policy',
+                              help='Set AI-QoS adaptive policy on a blockdev')
+    p.add_argument('name', help='Blockdev name. Example: Malloc0')
+    p.add_argument('enabled', type=int, choices=[0, 1],
+                   help='Enable (1) or disable (0) AI-QoS adaptive policy')
+    p.add_argument('--check-interval-us', type=int, default=0,
+                   help='Condition check interval in microseconds (0 to keep current)')
+    p.set_defaults(func=bdev_set_ai_qos_policy)
+
+    def bdev_set_urgent_config(args):
+        args.client.bdev_set_urgent_config(
+                                       name=args.name,
+                                       enabled=args.enabled,
+                                       token=args.token,
+                                       expiry_ticks=args.expiry_ticks,
+                                       max_burst_ios_per_ts=args.max_burst_ios_per_ts,
+                                       max_burst_bytes_per_ts=args.max_burst_bytes_per_ts)
+
+    p = subparsers.add_parser('bdev_set_urgent_config',
+                              help='Configure urgent I/O on a blockdev')
+    p.add_argument('name', help='Blockdev name. Example: Malloc0')
+    p.add_argument('enabled', type=int, choices=[0, 1],
+                   help='Enable (1) or disable (0) urgent I/O')
+    p.add_argument('--token', type=int, default=0,
+                   help='64-bit token value for urgent I/O authentication')
+    p.add_argument('--expiry-ticks', type=int, default=0,
+                   help='Token expiry timestamp in tsc ticks')
+    p.add_argument('--max-burst-ios-per-ts', type=int, default=0,
+                   help='Max urgent IOs per timeslice (0 to keep current)')
+    p.add_argument('--max-burst-bytes-per-ts', type=int, default=0,
+                   help='Max urgent bytes per timeslice (0 to keep current)')
+    p.set_defaults(func=bdev_set_urgent_config)
+
+    def bdev_get_qos_conditions(args):
+        args.client.bdev_get_qos_conditions(name=args.name)
+
+    p = subparsers.add_parser('bdev_get_qos_conditions',
+                              help='Get current QoS condition level on a blockdev')
+    p.add_argument('name', help='Blockdev name. Example: Malloc0')
+    p.set_defaults(func=bdev_get_qos_conditions)
+
     def bdev_error_inject_error(args):
         args.client.bdev_error_inject_error(
                                          name=args.name,

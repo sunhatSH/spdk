@@ -1186,3 +1186,143 @@ cleanup:
 }
 
 SPDK_RPC_REGISTER("bdev_get_histogram_borders", rpc_bdev_get_histogram_borders, SPDK_RPC_RUNTIME)
+
+static void
+rpc_bdev_set_ai_qos_policy(struct spdk_jsonrpc_request *request,
+			   const struct spdk_json_val *params)
+{
+	struct rpc_bdev_set_ai_qos_policy_ctx req = {};
+	struct spdk_bdev_desc *desc;
+	int rc;
+
+	if (spdk_json_decode_object(params, rpc_bdev_set_ai_qos_policy_decoders,
+				    SPDK_COUNTOF(rpc_bdev_set_ai_qos_policy_decoders),
+				    &req)) {
+		SPDK_ERRLOG("spdk_json_decode_object failed\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "spdk_json_decode_object failed");
+		free_rpc_bdev_set_ai_qos_policy(&req);
+		return;
+	}
+
+	rc = spdk_bdev_open_ext(req.name, false, dummy_bdev_event_cb, NULL, &desc);
+	if (rc != 0) {
+		SPDK_ERRLOG("Failed to open bdev '%s': %d\n", req.name, rc);
+		spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
+		free_rpc_bdev_set_ai_qos_policy(&req);
+		return;
+	}
+
+	spdk_bdev_set_ai_qos_policy(spdk_bdev_desc_get_bdev(desc), req.enabled,
+				    req.check_interval_us,
+				    rpc_bdev_set_qos_limit_complete, request);
+
+	spdk_bdev_close(desc);
+	free_rpc_bdev_set_ai_qos_policy(&req);
+}
+
+SPDK_RPC_REGISTER("bdev_set_ai_qos_policy", rpc_bdev_set_ai_qos_policy, SPDK_RPC_RUNTIME)
+
+static void
+rpc_bdev_set_urgent_config(struct spdk_jsonrpc_request *request,
+			   const struct spdk_json_val *params)
+{
+	struct rpc_bdev_set_urgent_config_ctx req = {};
+	struct spdk_bdev_desc *desc;
+	int rc;
+
+	if (spdk_json_decode_object(params, rpc_bdev_set_urgent_config_decoders,
+				    SPDK_COUNTOF(rpc_bdev_set_urgent_config_decoders),
+				    &req)) {
+		SPDK_ERRLOG("spdk_json_decode_object failed\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "spdk_json_decode_object failed");
+		free_rpc_bdev_set_urgent_config(&req);
+		return;
+	}
+
+	rc = spdk_bdev_open_ext(req.name, false, dummy_bdev_event_cb, NULL, &desc);
+	if (rc != 0) {
+		SPDK_ERRLOG("Failed to open bdev '%s': %d\n", req.name, rc);
+		spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
+		free_rpc_bdev_set_urgent_config(&req);
+		return;
+	}
+
+	spdk_bdev_set_urgent_config(spdk_bdev_desc_get_bdev(desc),
+				    req.enabled, req.token, req.expiry_ticks,
+				    req.max_burst_ios_per_ts,
+				    req.max_burst_bytes_per_ts,
+				    rpc_bdev_set_qos_limit_complete, request);
+
+	spdk_bdev_close(desc);
+	free_rpc_bdev_set_urgent_config(&req);
+}
+
+SPDK_RPC_REGISTER("bdev_set_urgent_config", rpc_bdev_set_urgent_config, SPDK_RPC_RUNTIME)
+
+static void
+rpc_bdev_get_qos_conditions(struct spdk_jsonrpc_request *request,
+			    const struct spdk_json_val *params)
+{
+	struct rpc_bdev_get_qos_conditions_ctx req = {};
+	struct spdk_bdev_desc *desc;
+	struct spdk_json_write_ctx *w;
+	struct spdk_bdev *bdev;
+	enum spdk_bdev_qos_cond_level cond_level;
+	int rc;
+
+	if (spdk_json_decode_object(params, rpc_bdev_get_qos_conditions_decoders,
+				    SPDK_COUNTOF(rpc_bdev_get_qos_conditions_decoders),
+				    &req)) {
+		SPDK_ERRLOG("spdk_json_decode_object failed\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "spdk_json_decode_object failed");
+		free_rpc_bdev_get_qos_conditions(&req);
+		return;
+	}
+
+	rc = spdk_bdev_open_ext(req.name, false, dummy_bdev_event_cb, NULL, &desc);
+	if (rc != 0) {
+		SPDK_ERRLOG("Failed to open bdev '%s': %d\n", req.name, rc);
+		spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
+		free_rpc_bdev_get_qos_conditions(&req);
+		return;
+	}
+
+	bdev = spdk_bdev_desc_get_bdev(desc);
+	rc = spdk_bdev_get_qos_conditions(bdev, &cond_level);
+	if (rc != 0) {
+		spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
+		spdk_bdev_close(desc);
+		free_rpc_bdev_get_qos_conditions(&req);
+		return;
+	}
+
+	w = spdk_jsonrpc_begin_result(request);
+
+	spdk_json_write_object_begin(w);
+	spdk_json_write_named_string(w, "name", spdk_bdev_get_name(bdev));
+	switch (cond_level) {
+	case SPDK_BDEV_QOS_COND_GREEN:
+		spdk_json_write_named_string(w, "condition", "green");
+		break;
+	case SPDK_BDEV_QOS_COND_YELLOW:
+		spdk_json_write_named_string(w, "condition", "yellow");
+		break;
+	case SPDK_BDEV_QOS_COND_RED:
+		spdk_json_write_named_string(w, "condition", "red");
+		break;
+	default:
+		spdk_json_write_named_string(w, "condition", "unknown");
+		break;
+	}
+	spdk_json_write_object_end(w);
+
+	spdk_jsonrpc_end_result(request, w);
+
+	spdk_bdev_close(desc);
+	free_rpc_bdev_get_qos_conditions(&req);
+}
+
+SPDK_RPC_REGISTER("bdev_get_qos_conditions", rpc_bdev_get_qos_conditions, SPDK_RPC_RUNTIME)

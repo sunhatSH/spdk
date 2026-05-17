@@ -1334,6 +1334,76 @@
       ]
     },
     {
+      "name": "bdev_set_ai_qos_policy",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true,
+          "description": "Block device name"
+        },
+        {
+          "name": "enabled",
+          "type": "boolean",
+          "required": true,
+          "description": "Enable or disable AI-QoS adaptive policy"
+        },
+        {
+          "name": "check_interval_us",
+          "type": "uint32",
+          "description": "Condition check interval in microseconds (0 to keep current)"
+        }
+      ]
+    },
+    {
+      "name": "bdev_set_urgent_config",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true,
+          "description": "Block device name"
+        },
+        {
+          "name": "enabled",
+          "type": "boolean",
+          "required": true,
+          "description": "Enable or disable urgent I/O"
+        },
+        {
+          "name": "token",
+          "type": "uint64",
+          "description": "64-bit token value for urgent I/O authentication"
+        },
+        {
+          "name": "expiry_ticks",
+          "type": "uint64",
+          "description": "Token expiry timestamp in tsc ticks"
+        },
+        {
+          "name": "max_burst_ios_per_ts",
+          "type": "uint32",
+          "description": "Max urgent IOs per timeslice (0 to keep current)"
+        },
+        {
+          "name": "max_burst_bytes_per_ts",
+          "type": "uint64",
+          "description": "Max urgent bytes per timeslice (0 to keep current)"
+        }
+      ]
+    },
+    {
+      "name": "bdev_get_qos_conditions",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true,
+          "description": "Block device name"
+        }
+      ]
+    },
+    {
       "name": "bdev_set_qd_sampling_period",
       "params": [
         {
