@@ -66,6 +66,33 @@ struct spdk_bdev_qos_auto_urgent_cfg {
 	uint32_t	max_auto_urgent_per_ts;	/* max auto-urgent IOs per 1ms timeslice */
 };
 
+/** AI-QoS: workload pattern detection for AI inference/training IOs */
+struct spdk_bdev_qos_ai_workload {
+	bool		enabled;
+
+	/* EMA smoothing factor: alpha = ema_alpha / 256 (0..255) */
+	uint8_t		ema_alpha;		/* default 26 = ~0.1 */
+
+	/* EMA of IO sizes (in blocks) */
+	uint64_t	ema_write_blocks;
+	uint64_t	ema_read_blocks;
+
+	/* Consecutive large-IO counters for burst detection */
+	uint32_t	large_write_consecutive;
+	uint32_t	large_read_consecutive;
+
+	/* Thresholds */
+	uint64_t	ckpt_size_threshold_blocks;	/* e.g. 2048 blocks = 1MB */
+	uint32_t	ckpt_consecutive_threshold;	/* e.g. 64 consecutive large writes */
+	uint64_t	dataload_size_threshold_blocks;/* e.g. 512 blocks = 256KB */
+	uint32_t	dataload_consecutive_threshold;/* e.g. 128 consecutive large reads */
+
+	/* Detection output (read by condition poller) */
+	bool		checkpoint_active;
+	bool		data_load_active;
+	bool		inference_steady;	/* steady-state small IO inference pattern */
+};
+
 /** AI-QoS: condition snapshot */
 struct spdk_bdev_qos_cond_snapshot {
 	/* Disk */
@@ -145,6 +172,9 @@ struct spdk_bdev_qos {
 	uint32_t				auto_urgent_consecutive;
 	uint32_t				auto_urgent_count_this_ts;
 
+	/** AI workload pattern detector */
+	struct spdk_bdev_qos_ai_workload	ai_workload;
+
 	/** Urgent IO priority queue (drained before normal qos queue) */
 	TAILQ_HEAD(, spdk_bdev_io)		urgent_queued_io;
 };
@@ -189,6 +219,10 @@ void bdev_qos_adaptive_adjust(struct spdk_bdev_qos *qos);
 
 /* AI-QoS urgent IO */
 bool bdev_qos_urgent_token_check(struct spdk_bdev_qos *qos, struct spdk_bdev_io *bdev_io);
+
+/* AI-QoS workload pattern detection */
+void bdev_qos_ai_workload_sample(struct spdk_bdev_qos *qos, struct spdk_bdev_io *bdev_io);
+void bdev_qos_ai_workload_detect(struct spdk_bdev_qos *qos);
 
 /* Poller dispatch */
 int bdev_qos_cond_poller(void *arg);

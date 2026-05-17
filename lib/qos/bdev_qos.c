@@ -310,6 +310,14 @@ bdev_qos_cond_snapshot_init(struct spdk_bdev_qos *qos)
 	/* Initialize urgent queue */
 	TAILQ_INIT(&qos->urgent_queued_io);
 
+	/* Set defaults for AI workload pattern detection */
+	qos->ai_workload.enabled = false;
+	qos->ai_workload.ema_alpha = 26;   /* ~0.1 */
+	qos->ai_workload.ckpt_size_threshold_blocks = 2048;    /* 1MB */
+	qos->ai_workload.ckpt_consecutive_threshold = 64;
+	qos->ai_workload.dataload_size_threshold_blocks = 512; /* 256KB */
+	qos->ai_workload.dataload_consecutive_threshold = 128;
+
 	/* Set defaults for auto-urgent configuration */
 	qos->auto_urgent_cfg.enabled = false;
 	qos->auto_urgent_cfg.queue_depth_threshold = 64;
@@ -500,6 +508,119 @@ bdev_qos_urgent_token_check(struct spdk_bdev_qos *qos, struct spdk_bdev_io *bdev
 
 /*
  * =================================
+ * AI-QoS: Workload pattern detection
+ * =================================
+ *
+ * EMA-based IO size tracking + consecutive large-IO burst detection.
+ * No sliding window needed — just a few integer ops per IO completion.
+ *
+ * Patterns detected:
+ *   - LLM Checkpoint: sustained large writes (EMA_write >> threshold)
+ *   - Data loading:   sustained large reads (EMA_read >> threshold)
+ *   - Inference:      small/medium IOs, steady state
+ */
+
+#define SPDK_BDEV_QOS_EMA_ALPHA_DEFAULT	26   /* ~0.1 in 1/256 units */
+
+void
+bdev_qos_ai_workload_sample(struct spdk_bdev_qos *qos, struct spdk_bdev_io *bdev_io)
+{
+	struct spdk_bdev_qos_ai_workload *wl = &qos->ai_workload;
+	uint64_t blocks;
+	int64_t diff;
+	uint8_t alpha;
+
+	if (!wl->enabled) {
+		return;
+	}
+
+	/* Get IO size in blocks */
+	switch (bdev_io->type) {
+	case SPDK_BDEV_IO_TYPE_READ:
+	case SPDK_BDEV_IO_TYPE_WRITE:
+	case SPDK_BDEV_IO_TYPE_WRITE_UNCORRECTABLE:
+		blocks = bdev_io->u.bdev.num_blocks;
+		break;
+	default:
+		return;
+	}
+
+	alpha = wl->ema_alpha;
+
+	if (bdev_io->type == SPDK_BDEV_IO_TYPE_READ) {
+		/* EMA update for read size */
+		diff = (int64_t)blocks - (int64_t)wl->ema_read_blocks;
+		wl->ema_read_blocks += (uint64_t)((diff * (int32_t)alpha) >> 8);
+
+		if (blocks >= wl->dataload_size_threshold_blocks) {
+			wl->large_read_consecutive++;
+		} else {
+			wl->large_read_consecutive = 0;
+		}
+	} else {
+		/* EMA update for write size */
+		diff = (int64_t)blocks - (int64_t)wl->ema_write_blocks;
+		wl->ema_write_blocks += (uint64_t)((diff * (int32_t)alpha) >> 8);
+
+		if (blocks >= wl->ckpt_size_threshold_blocks) {
+			wl->large_write_consecutive++;
+		} else {
+			wl->large_write_consecutive = 0;
+		}
+	}
+}
+
+void
+bdev_qos_ai_workload_detect(struct spdk_bdev_qos *qos)
+{
+	struct spdk_bdev_qos_ai_workload *wl = &qos->ai_workload;
+
+	if (!wl->enabled) {
+		wl->checkpoint_active = false;
+		wl->data_load_active = false;
+		wl->inference_steady = false;
+		return;
+	}
+
+	/* Checkpoint detection: sustained large writes */
+	if (wl->large_write_consecutive >= wl->ckpt_consecutive_threshold &&
+	    wl->ema_write_blocks >= wl->ckpt_size_threshold_blocks) {
+		if (!wl->checkpoint_active) {
+			SPDK_DEBUGLOG(bdev, "AI-QoS: checkpoint detected (write EMA=%"
+				      PRIu64" blocks, consecutive=%u)\n",
+				      wl->ema_write_blocks, wl->large_write_consecutive);
+		}
+		wl->checkpoint_active = true;
+	} else {
+		wl->checkpoint_active = false;
+	}
+
+	/* Data loading detection: sustained large reads */
+	if (wl->large_read_consecutive >= wl->dataload_consecutive_threshold &&
+	    wl->ema_read_blocks >= wl->dataload_size_threshold_blocks) {
+		if (!wl->data_load_active) {
+			SPDK_DEBUGLOG(bdev, "AI-QoS: data load detected (read EMA=%"
+				      PRIu64" blocks, consecutive=%u)\n",
+				      wl->ema_read_blocks, wl->large_read_consecutive);
+		}
+		wl->data_load_active = true;
+	} else {
+		wl->data_load_active = false;
+	}
+
+	/* Inference steady state: small IOs, neither checkpoint nor data load */
+	if (!wl->checkpoint_active && !wl->data_load_active) {
+		if (!wl->inference_steady) {
+			SPDK_DEBUGLOG(bdev, "AI-QoS: inference steady state\n");
+		}
+		wl->inference_steady = true;
+	} else {
+		wl->inference_steady = false;
+	}
+}
+
+/*
+ * =================================
  * AI-QoS: Condition poller entry
  * =================================
  */
@@ -519,6 +640,8 @@ bdev_qos_cond_poller(void *arg)
 	 * snapshot data already stored in qos->cond_snap.
 	 */
 	bdev_qos_adaptive_adjust(qos);
+
+	bdev_qos_ai_workload_detect(qos);
 
 	return SPDK_POLLER_BUSY;
 }

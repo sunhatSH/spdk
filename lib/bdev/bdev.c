@@ -7709,6 +7709,12 @@ bdev_io_complete(void *ctx)
 	}
 
 	bdev_io_update_io_stat(bdev_io, tsc_diff);
+
+	/* AI-QoS: sample IO for workload pattern detection */
+	if (bdev_io->bdev->internal.qos) {
+		bdev_qos_ai_workload_sample(bdev_io->bdev->internal.qos, bdev_io);
+	}
+
 	_bdev_io_complete(bdev_io);
 }
 
