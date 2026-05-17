@@ -3,36 +3,33 @@ name: Sync docs to github pages
 
 on:
   workflow_dispatch:
-  # schedule:
-  # - cron: "0 0 * * *"    # Every 24 hours at midnight UTC
-  # push:
-  #   paths:
-  #     - docs
+  schedule:
+    - cron: "0 0 * * *"    # Every 24 hours at midnight UTC
+  push:
+    paths:
+      - doc
+      - schema
 
 jobs:
   sync-gh-pages:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/actions/jekyll-build-pages:v1.0.13
+      image: ghcr.io/spdk/spdk-ci:fedora_40
     steps:
     - name: Checkout Pages repository
       uses: actions/checkout@v4.1.7
       with:
         repository: spdk/spdk.github.io
         path: pages
-    - name: Checkout SPDK repository
-      uses: actions/checkout@v4.1.7
-      with:
-        repository: spdk/spdk
-        path: spdk
     - name: Install dependencies
       run: |
-        apt-get update
-        ./spdk/scripts/pkgdep.sh --docs
+        set -x
+        dnf -y install jekyll
     - name: Run doc generation script
       id: vars
       working-directory: pages
       run: |
+        set -x
         ./update-doc.sh
         echo "spdk_sha=$(cat _doc_version.txt)" >> $GITHUB_OUTPUT
     - name: Commit and Push changes

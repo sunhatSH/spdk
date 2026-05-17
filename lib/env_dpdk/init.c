@@ -12,6 +12,7 @@
 #include "spdk/log.h"
 #include "spdk/config.h"
 #include "spdk/string.h"
+#include "spdk/cpuset.h"
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -194,13 +195,15 @@ get_cpu_vendor_name(char *vendor_name_buf, size_t buf_len)
 
 	if (target_substr == NULL) {
 		SPDK_ERRLOG("field %s not found in file %s.\n", "vendor_id", file_path);
-		return -ESRCH;
+		ret = -ESRCH;
+		goto out;
 	}
 
 	target_substr = strstr(line, ":");
 	if (target_substr == NULL) {
 		SPDK_ERRLOG("separator char ':' not found in field line: %s.\n", line);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto out;
 	}
 
 	*target_substr = 0; /* eliminate the separator ':'. */
@@ -209,20 +212,26 @@ get_cpu_vendor_name(char *vendor_name_buf, size_t buf_len)
 
 	if (strlen(vendor_name) == 0) {
 		SPDK_ERRLOG("cpu vendor name not found in field line: %s.\n", line);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto out;
 	}
 
 	ret = snprintf(vendor_name_buf, buf_len, "%s", vendor_name);
 	if (ret < 0) {
 		SPDK_ERRLOG("copy CPU vendor name to output buf failed, ret=%d, errno=%d.\n",
 			    ret, errno);
-		return -errno;
+		ret = -errno;
+		goto out;
 	} else if ((size_t)ret >= buf_len) {
 		SPDK_WARNLOG("CPU vendor_name truncated from %s to %s\n",
 			     vendor_name, vendor_name_buf);
 	}
+	ret = 0;
 
-	return 0;
+out:
+	fclose(file);
+
+	return ret;
 }
 
 static int
@@ -277,6 +286,49 @@ x86_cpu_support_iommu(void)
 
 #endif
 
+static char *
+coremask_to_corelist(const char *mask)
+{
+	struct spdk_cpuset cpuset = {};
+	char buf[SPDK_CPUSET_SIZE];
+	int len = 0;
+	uint32_t cpu, start;
+
+	if (spdk_cpuset_parse(&cpuset, mask) != 0) {
+		return NULL;
+	}
+
+	cpu = 0;
+	while (cpu < SPDK_CPUSET_SIZE) {
+		if (!spdk_cpuset_get_cpu(&cpuset, cpu)) {
+			cpu++;
+			continue;
+		}
+		start = cpu;
+		while (cpu + 1 < SPDK_CPUSET_SIZE && spdk_cpuset_get_cpu(&cpuset, cpu + 1)) {
+			cpu++;
+		}
+		if (len > 0) {
+			len += snprintf(buf + len, sizeof(buf) - len, ",");
+		}
+		if (cpu == start) {
+			len += snprintf(buf + len, sizeof(buf) - len, "%u", start);
+		} else {
+			len += snprintf(buf + len, sizeof(buf) - len, "%u-%u", start, cpu);
+		}
+		if ((size_t)len >= sizeof(buf)) {
+			return NULL;
+		}
+		cpu++;
+	}
+
+	if (len == 0) {
+		return NULL;
+	}
+
+	return _sprintf_alloc("%s", buf);
+}
+
 static int
 build_eal_cmdline(const struct spdk_env_opts *opts)
 {
@@ -318,7 +370,7 @@ build_eal_cmdline(const struct spdk_env_opts *opts)
 		args = push_arg(args, &argcount, _sprintf_alloc("--lcores=%s", opts->lcore_map));
 	} else if (opts->core_mask[0] == '-') {
 		/*
-		 * Set the coremask:
+		 * Set the core specification:
 		 *
 		 * - if it starts with '-', we presume it's literal EAL arguments such
 		 *   as --lcores.
@@ -326,8 +378,8 @@ build_eal_cmdline(const struct spdk_env_opts *opts)
 		 * - if it starts with '[', we presume it's a core list to use with the
 		 *   -l option.
 		 *
-		 * - otherwise, it's a CPU mask of the form "0xff.." as expected by the
-		 *   -c option.
+		 * - otherwise, it's a CPU mask of the form "0xff.." which is converted
+		 *   to a core list for the -l option (DPDK deprecated -c in v25.07).
 		 */
 		args = push_arg(args, &argcount, _sprintf_alloc("%s", opts->core_mask));
 	} else if (opts->core_mask[0] == '[') {
@@ -342,7 +394,15 @@ build_eal_cmdline(const struct spdk_env_opts *opts)
 		}
 		args = push_arg(args, &argcount, l_arg);
 	} else {
-		args = push_arg(args, &argcount, _sprintf_alloc("-c %s", opts->core_mask));
+		char *corelist = coremask_to_corelist(opts->core_mask);
+
+		if (corelist == NULL) {
+			fprintf(stderr, "Invalid core mask '%s'\n", opts->core_mask);
+			free_args(args, argcount);
+			return -1;
+		}
+		args = push_arg(args, &argcount, _sprintf_alloc("-l %s", corelist));
+		free(corelist);
 	}
 
 	if (args == NULL) {
@@ -389,6 +449,7 @@ build_eal_cmdline(const struct spdk_env_opts *opts)
 		if (args == NULL) {
 			return -1;
 		}
+		mem_disable_vtophys();
 	}
 
 	if (no_huge) {
@@ -534,7 +595,7 @@ build_eal_cmdline(const struct spdk_env_opts *opts)
 		 * virtual machines) don't have an IOMMU capable of handling the full virtual
 		 * address space and DPDK doesn't currently catch that. Add a check in SPDK
 		 * and force iova-mode=pa here. */
-		if (!no_huge && !x86_cpu_support_iommu()) {
+		else if (!no_huge && !x86_cpu_support_iommu()) {
 			args = push_arg(args, &argcount, _sprintf_alloc("--iova-mode=pa"));
 			if (args == NULL) {
 				return -1;
@@ -543,9 +604,11 @@ build_eal_cmdline(const struct spdk_env_opts *opts)
 #elif defined(__PPC64__)
 		/* On Linux + PowerPC, DPDK doesn't support VA mode at all. Unfortunately, it doesn't correctly
 		 * auto-detect at the moment, so we'll just force it here. */
-		args = push_arg(args, &argcount, _sprintf_alloc("--iova-mode=pa"));
-		if (args == NULL) {
-			return -1;
+		else {
+			args = push_arg(args, &argcount, _sprintf_alloc("--iova-mode=pa"));
+			if (args == NULL) {
+				return -1;
+			}
 		}
 #endif
 	}
@@ -592,10 +655,12 @@ build_eal_cmdline(const struct spdk_env_opts *opts)
 			return -1;
 		}
 
-		/* set the process type */
-		args = push_arg(args, &argcount, _sprintf_alloc("--proc-type=auto"));
-		if (args == NULL) {
-			return -1;
+		/* set the process type, if not provided by the user */
+		if (!opts->env_context || strstr(opts->env_context, "--proc-type") == NULL) {
+			args = push_arg(args, &argcount, _sprintf_alloc("--proc-type=auto"));
+			if (args == NULL) {
+				return -1;
+			}
 		}
 	}
 

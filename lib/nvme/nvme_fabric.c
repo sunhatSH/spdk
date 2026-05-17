@@ -537,13 +537,15 @@ nvme_fabric_qpair_connect_async(struct spdk_nvme_qpair *qpair, uint32_t num_entr
 
 	assert(qpair->reserved_req != NULL);
 	req = qpair->reserved_req;
-	NVME_INIT_REQUEST(req, nvme_completion_poll_cb, status, NVME_PAYLOAD_CONTIG(nvmf_data, NULL),
-			  sizeof(*nvmf_data), 0);
+	NVME_INIT_REQUEST_CONTIG(req, nvme_completion_poll_cb, status, nvmf_data, NULL, sizeof(*nvmf_data),
+				 0, 0, 0);
+	req->qpair_reserved = true;
 
 	memcpy(&req->cmd, &cmd, sizeof(cmd));
 
 	if (nvme_qpair_is_admin_queue(qpair)) {
 		nvmf_data->cntlid = 0xFFFF;
+		req->pid = g_spdk_nvme_pid;
 	} else {
 		nvmf_data->cntlid = ctrlr->cntlid;
 	}
@@ -568,9 +570,30 @@ nvme_fabric_qpair_connect_async(struct spdk_nvme_qpair *qpair, uint32_t num_entr
 				      spdk_get_ticks_hz() / SPDK_SEC_TO_USEC;
 	}
 
-	qpair->auth.flags = 0;
+	qpair->auth.flags.raw = 0;
 	qpair->fabric_poll_status = status;
 	return 0;
+}
+
+void
+nvme_fabric_qpair_poll_cleanup(struct spdk_nvme_qpair *qpair)
+{
+	struct nvme_completion_poll_status *status = qpair->fabric_poll_status;
+
+	qpair->fabric_poll_status = NULL;
+	if (!status->timed_out) {
+		spdk_free(status->dma_data);
+		free(status);
+	}
+}
+
+void
+nvme_fabric_qpair_auth_cleanup(struct spdk_nvme_qpair *qpair, int status)
+{
+	if (qpair->auth.cb_fn != NULL) {
+		qpair->auth.cb_fn(qpair->auth.cb_ctx, status);
+		qpair->auth.cb_fn = NULL;
+	}
 }
 
 int
@@ -614,28 +637,21 @@ nvme_fabric_qpair_connect_poll(struct spdk_nvme_qpair *qpair)
 		NVME_CTRLR_DEBUGLOG(ctrlr, "cntlid set\n");
 	}
 	if (rsp->status_code_specific.success.authreq.atr) {
-		qpair->auth.flags |= NVME_QPAIR_AUTH_FLAG_ATR;
+		qpair->auth.flags.atr = true;
 	}
 	if (rsp->status_code_specific.success.authreq.ascr) {
-		qpair->auth.flags |= NVME_QPAIR_AUTH_FLAG_ASCR;
+		qpair->auth.flags.ascr = true;
 	}
 finish:
-	qpair->fabric_poll_status = NULL;
-	if (!status->timed_out) {
-		spdk_free(status->dma_data);
-		free(status);
-	}
-
+	nvme_fabric_qpair_poll_cleanup(qpair);
 	return rc;
 }
 
 bool
 nvme_fabric_qpair_auth_required(struct spdk_nvme_qpair *qpair)
 {
-	struct spdk_nvme_ctrlr *ctrlr = qpair->ctrlr;
-
-	return qpair->auth.flags & (NVME_QPAIR_AUTH_FLAG_ATR | NVME_QPAIR_AUTH_FLAG_ASCR) ||
-	       ctrlr->opts.dhchap_ctrlr_key != NULL || qpair->auth.cb_fn != NULL;
+	return qpair->auth.flags.atr || qpair->auth.flags.ascr ||
+	       qpair->ctrlr->opts.dhchap_ctrlr_key != NULL || qpair->auth.cb_fn != NULL;
 }
 
 int

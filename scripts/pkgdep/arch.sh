@@ -9,21 +9,8 @@ pacman -Sy --needed --noconfirm gcc make cunit libaio openssl \
 # Additional dependencies for SPDK CLI
 pacman -Sy --needed --noconfirm python-pexpect python-pip libffi
 
-# per PEP668 work inside virtual env
-virtdir=${PIP_VIRTDIR:-/var/spdk/dependencies/pip}
-python3 -m venv --upgrade-deps --system-site-packages "$virtdir"
-source "$virtdir/bin/activate"
+pkgdep_setup_python_venv "$rootdir"
 
-# install python packages
-pip install configshell_fb
-pip install pyelftools
-pip install ijson
-pip install python-magic
-pip install grpcio
-pip install grpcio-tools
-pip install pyyaml
-pip install Jinja2
-pip install tabulate
 # Additional dependencies for DPDK
 pacman -Sy --needed --noconfirm numactl nasm
 # Additional dependencies for ISA-L used in compression

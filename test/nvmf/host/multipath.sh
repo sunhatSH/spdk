@@ -6,14 +6,14 @@
 testdir=$(readlink -f "$(dirname $0)")
 rootdir=$(readlink -f "$testdir/../../..")
 source "$rootdir/test/common/autotest_common.sh"
+TPOINT_NAME=TCP_REQ_EXECUTED
+NVMF_APP_TRACE_ARG="-e nvmf_tcp:$TPOINT_NAME"
 source "$rootdir/test/nvmf/common.sh"
 
 MALLOC_BDEV_SIZE=64
 MALLOC_BLOCK_SIZE=512
 
 rpc_py="$rootdir/scripts/rpc.py"
-bpf_sh="$rootdir/scripts/bpftrace.sh"
-
 bdevperf_rpc_sock=/var/tmp/bdevperf.sock
 
 # NQN prefix to use for subsystem NQNs
@@ -30,7 +30,6 @@ cleanup() {
 nvmftestinit
 
 nvmfappstart -m 0x3
-nvmfapp_pid=$!
 
 $rpc_py nvmf_create_transport $NVMF_TRANSPORT_OPTS -u 8192
 $rpc_py bdev_malloc_create $MALLOC_BDEV_SIZE $MALLOC_BLOCK_SIZE -b Malloc0
@@ -40,7 +39,7 @@ $rpc_py nvmf_subsystem_add_ns $NQN Malloc0
 $rpc_py nvmf_subsystem_add_listener $NQN -t $TEST_TRANSPORT -a $NVMF_FIRST_TARGET_IP -s $NVMF_PORT
 $rpc_py nvmf_subsystem_add_listener $NQN -t $TEST_TRANSPORT -a $NVMF_FIRST_TARGET_IP -s $NVMF_SECOND_PORT
 
-"$rootdir/build/examples/bdevperf" -m 0x4 -z -r $bdevperf_rpc_sock -q 128 -o 4096 -w verify -t 90 &> "$testdir/try.txt" &
+run_app_bg "$SPDK_EXAMPLE_DIR/bdevperf" -m 0x4 -z -r $bdevperf_rpc_sock -q 128 -o 4096 -w verify -t 90 &> "$testdir/try.txt"
 bdevperf_pid=$!
 
 trap 'cleanup; exit 1' SIGINT SIGTERM EXIT
@@ -59,18 +58,37 @@ function set_ANA_state() {
 	$rpc_py nvmf_subsystem_listener_set_ana_state $NQN -t $TEST_TRANSPORT -a $NVMF_FIRST_TARGET_IP -s $NVMF_SECOND_PORT -n $2
 }
 
+# Filter out admin qpair (qid:0) since TCP_REQ_EXECUTED fires for all
+# commands including admin (e.g. AEN, Get Log Page), but we only care
+# about IO traffic.
+function _spdk_trace_io() {
+	"$SPDK_BIN_DIR/spdk_trace" -s nvmf -i $NVMF_APP_SHM_ID \
+		| grep "$TPOINT_NAME" | grep -v "qid:0"
+}
+
+function _confirm_io_on_port() {
+	local port
+
+	# "inaccessible inaccessible" case -- no IO expected on any port.
+	if (($# == 0)); then
+		_spdk_trace_io | grep -q . && return 1
+		return 0
+	fi
+
+	for port; do
+		_spdk_trace_io | grep -q " ${NVMF_FIRST_TARGET_IP}:${port} " || return 1
+	done
+}
+
 # check for io on the expected ANA state port
 function confirm_io_on_port() {
-	$bpf_sh $nvmfapp_pid "$rootdir/scripts/bpf/nvmf_path.bt" &> "$testdir/trace.txt" &
-	dtrace_pid=$!
-	sleep 6
-	active_port=$($rpc_py nvmf_subsystem_get_listeners $NQN | jq -r '.[] | select (.ana_states[0].ana_state=="'$1'") | .address.trsvcid')
-	cat "$testdir/trace.txt"
-	port=$(cut < "$testdir/trace.txt" -d ']' -f1 | awk '$1=="@path['$NVMF_FIRST_TARGET_IP'," {print $2}' | sed -n '1p')
-	[[ "$active_port" == "$port" ]]
-	[[ "$port" == "$2" ]]
-	kill $dtrace_pid
-	rm -f "$testdir/trace.txt"
+	local state=$1 actual_port=$2
+
+	$rpc_py trace_clear
+
+	active_port=$($rpc_py nvmf_subsystem_get_listeners $NQN | jq -r '.[] | select (.ana_states[0].ana_state=="'$state'") | .address.trsvcid')
+
+	waitforcondition "_confirm_io_on_port $active_port $actual_port"
 }
 
 "$rootdir/examples/bdev/bdevperf/bdevperf.py" -t 120 -s $bdevperf_rpc_sock perform_tests &

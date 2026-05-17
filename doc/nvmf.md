@@ -233,6 +233,13 @@ For example, to allow SPDK to use cores 24, 25, 26 and 27:
 build/bin/nvmf_tgt -m 0xF000000
 ~~~
 
+### Interrupt Mode {#nvmf_config_interrupt}
+
+The NVMe-oF target supports interrupt mode for the vfio-user, TCP, and RDMA
+transports. Interrupt mode allows reactors to sleep when idle and wake on network
+or device events, reducing CPU usage when the target is not under load. For details
+on enabling and using interrupt mode, see @ref nvmf_interrupt_mode.
+
 ## Configuring the Linux NVMe over Fabrics Host {#nvmf_host}
 
 Both the Linux kernel and SPDK implement an NVMe over Fabrics host.
@@ -434,3 +441,16 @@ affects the other, since the whole bdev would be removed from and added back to 
 If a bdev is of type bdev_nvme and this underlying NVMe namespace is part of an NVM subsystem containing multiple namespaces,
 then all bdevs associated with that underlying subsystem will be destroyed and re-added,
 even if they are in a separate NVMe-oF subsystem that wasn't being reset. Beware of side effects.
+
+## NVMe firmware update
+
+NVMe firmware update process involves use of two admin commands: firmware download and firmware commit.
+FW download is used only to get the FW image to the drive, then FW commit is used to tell the drive to:
+
+1. store the FW image in particular firmware slot
+2. store and activate the image after controller reset (or NSSR)
+3. store and activate immediately without any reset (if NVMe drive supports that)
+
+Drive is never unregistered from the system after FW commit.
+User needs to trigger Reset/NSSR separately (in case of second option).
+Please refer to firmware commit/firmware download admin command section of NVMe spec for further details.

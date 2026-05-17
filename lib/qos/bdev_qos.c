@@ -92,6 +92,7 @@ bdev_get_io_size_in_byte(struct spdk_bdev_io *bdev_io)
 		return bdev_io->u.nvme_passthru.nbytes;
 	case SPDK_BDEV_IO_TYPE_READ:
 	case SPDK_BDEV_IO_TYPE_WRITE:
+	case SPDK_BDEV_IO_TYPE_WRITE_UNCORRECTABLE:
 		block_size = spdk_bdev_get_block_size(bdev_io->bdev);
 		return (uint64_t)bdev_io->u.bdev.num_blocks * block_size;
 	case SPDK_BDEV_IO_TYPE_ZCOPY:
