@@ -80,7 +80,7 @@ bdev_is_read_io(struct spdk_bdev_io *bdev_io)
 	}
 }
 
-static uint64_t
+uint64_t
 bdev_get_io_size_in_byte(struct spdk_bdev_io *bdev_io)
 {
 	uint32_t block_size;
@@ -291,6 +291,23 @@ void
 bdev_qos_cond_snapshot_init(struct spdk_bdev_qos *qos)
 {
 	memset(&qos->cond_snap, 0, sizeof(qos->cond_snap));
+
+	/* Set defaults for AI-QoS configuration */
+	qos->adaptive_cfg.check_interval_us = 100000; /* 100ms default */
+
+	qos->adaptive_cfg.disk_lat_yellow_ticks = 100000;  /* 100us */
+	qos->adaptive_cfg.disk_lat_red_ticks = 500000;     /* 500us */
+	qos->adaptive_cfg.mem_pressure_yellow = 0.70f;
+	qos->adaptive_cfg.mem_pressure_red = 0.90f;
+	qos->adaptive_cfg.queue_depth_yellow = 128;
+	qos->adaptive_cfg.queue_depth_red = 512;
+	qos->adaptive_cfg.queue_wait_yellow_ticks = 200000; /* 200us */
+	qos->adaptive_cfg.queue_wait_red_ticks = 1000000;   /* 1ms */
+	qos->adaptive_cfg.yellow_mult = 0.75f;
+	qos->adaptive_cfg.red_mult = 0.30f;
+
+	/* Initialize urgent queue */
+	TAILQ_INIT(&qos->urgent_queued_io);
 }
 
 void

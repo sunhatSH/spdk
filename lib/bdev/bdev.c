@@ -3392,11 +3392,44 @@ bdev_rw_split_get_buf_cb(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_i
 	_bdev_rw_split(bdev_io);
 }
 
+/* AI-QoS: drain urgent I/O queue, submitting all eligible urgent IOs */
+static int
+bdev_qos_urgent_io_drain(struct spdk_bdev_qos *qos)
+{
+	struct spdk_bdev_io *bdev_io, *tmp;
+	int submitted = 0;
+
+	TAILQ_FOREACH_SAFE(bdev_io, &qos->urgent_queued_io, internal.link, tmp) {
+		/* Check per-timeslice urgent limits */
+		if (qos->urgent_cfg.max_urgent_per_timeslice > 0 &&
+		    qos->urgent_count_this_ts >= (int32_t)qos->urgent_cfg.max_urgent_per_timeslice) {
+			break;
+		}
+		if (qos->urgent_cfg.max_urgent_bytes_per_ts > 0 &&
+		    qos->urgent_bytes_this_ts >= qos->urgent_cfg.max_urgent_bytes_per_ts) {
+			break;
+		}
+
+		TAILQ_REMOVE(&qos->urgent_queued_io, bdev_io, internal.link);
+
+		/* Update counters before submission */
+		qos->urgent_count_this_ts++;
+		qos->urgent_bytes_this_ts += bdev_get_io_size_in_byte(bdev_io);
+		qos->urgent_count_this_sec++;
+
+		bdev_io_do_submit(bdev_io->internal.ch, bdev_io);
+		submitted++;
+	}
+
+	return submitted;
+}
+
 static inline void
 _bdev_io_submit(struct spdk_bdev_io *bdev_io)
 {
 	struct spdk_bdev *bdev = bdev_io->bdev;
 	struct spdk_bdev_channel *bdev_ch = bdev_io->internal.ch;
+	struct spdk_bdev_qos *qos = bdev->internal.qos;
 
 	if (spdk_likely(bdev_ch->flags == 0)) {
 		bdev_io_do_submit(bdev_ch, bdev_io);
@@ -3406,12 +3439,21 @@ _bdev_io_submit(struct spdk_bdev_io *bdev_io)
 	if (bdev_ch->flags & BDEV_CH_RESET_IN_PROGRESS) {
 		_bdev_io_complete_in_submit(bdev_ch, bdev_io, SPDK_BDEV_IO_STATUS_ABORTED);
 	} else if (bdev_ch->flags & BDEV_CH_QOS_ENABLED) {
+		/* Check for urgent I/O bypass */
+		if (spdk_unlikely(bdev_io->internal.f.urgent) && qos != NULL &&
+		    qos->urgent_cfg.enabled &&
+		    bdev_qos_urgent_token_check(qos, bdev_io)) {
+			TAILQ_INSERT_TAIL(&qos->urgent_queued_io, bdev_io, internal.link);
+			bdev_qos_urgent_io_drain(qos);
+			return;
+		}
+
 		if (spdk_unlikely(bdev_io->type == SPDK_BDEV_IO_TYPE_ABORT) &&
 		    bdev_abort_queued_io(&bdev_ch->qos_queued_io, bdev_io->u.abort.bio_to_abort)) {
 			_bdev_io_complete_in_submit(bdev_ch, bdev_io, SPDK_BDEV_IO_STATUS_SUCCESS);
 		} else {
 			TAILQ_INSERT_TAIL(&bdev_ch->qos_queued_io, bdev_io, internal.link);
-			bdev_qos_io_submit(bdev_ch, bdev->internal.qos);
+			bdev_qos_io_submit(bdev_ch, qos);
 		}
 	} else {
 		SPDK_ERRLOG("unknown bdev_ch flag %x found\n", bdev_ch->flags);
@@ -3899,6 +3941,18 @@ bdev_channel_poll_qos(void *arg)
 	spdk_bdev_for_each_channel(bdev, bdev_channel_submit_qos_io, qos,
 				   bdev_channel_submit_qos_io_done);
 
+	/* Reset urgent per-timeslice counters and drain urgent queue */
+	qos->urgent_count_this_ts = 0;
+	qos->urgent_bytes_this_ts = 0;
+
+	/* Reset urgent per-second counters when a full second has elapsed */
+	if (now - qos->urgent_sec_start_ticks >= spdk_get_ticks_hz()) {
+		qos->urgent_count_this_sec = 0;
+		qos->urgent_sec_start_ticks = now;
+	}
+
+	bdev_qos_urgent_io_drain(qos);
+
 	return SPDK_POLLER_BUSY;
 }
 
@@ -3985,6 +4039,15 @@ bdev_enable_qos(struct spdk_bdev *bdev, struct spdk_bdev_channel *ch)
 			qos->poller = SPDK_POLLER_REGISTER(bdev_channel_poll_qos,
 							   bdev,
 							   SPDK_BDEV_QOS_TIMESLICE_IN_USEC);
+
+		/* Register the AI-QoS condition monitoring poller.
+		 * bdev_qos_cond_poller checks ai_qos_enabled internally,
+		 * so it is safe to register unconditionally.
+		 */
+		bdev_qos_cond_snapshot_init(qos);
+		qos->cond_poller = SPDK_POLLER_REGISTER(bdev_qos_cond_poller,
+							 qos,
+							 qos->adaptive_cfg.check_interval_us);
 		}
 
 		ch->flags |= BDEV_CH_QOS_ENABLED;
@@ -9632,6 +9695,7 @@ bdev_disable_qos_done(void *cb_arg)
 	if (qos->thread != NULL) {
 		spdk_put_io_channel(spdk_io_channel_from_ctx(qos->ch));
 		spdk_poller_unregister(&qos->poller);
+		spdk_poller_unregister(&qos->cond_poller);
 	}
 
 	free(qos);
