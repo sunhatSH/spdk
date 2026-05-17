@@ -26,18 +26,27 @@ dummy_bdev_event_cb(enum spdk_bdev_event_type type, struct spdk_bdev *bdev, void
 {
 }
 
+/* AI-QoS startup options (decoded as local variables, not in rpc_autogen struct) */
+struct rpc_bdev_set_options_aiqos {
+	bool	ai_qos_enabled;
+	int	ai_qos_decision_mode;
+};
+
 static const struct spdk_json_object_decoder rpc_bdev_set_options_decoders[] = {
 	{"bdev_io_pool_size", offsetof(struct rpc_bdev_set_options_ctx, bdev_io_pool_size), spdk_json_decode_uint32, true},
 	{"bdev_io_cache_size", offsetof(struct rpc_bdev_set_options_ctx, bdev_io_cache_size), spdk_json_decode_uint32, true},
 	{"bdev_auto_examine", offsetof(struct rpc_bdev_set_options_ctx, bdev_auto_examine), spdk_json_decode_bool, true},
 	{"iobuf_small_cache_size", offsetof(struct rpc_bdev_set_options_ctx, iobuf_small_cache_size), spdk_json_decode_uint32, true},
 	{"iobuf_large_cache_size", offsetof(struct rpc_bdev_set_options_ctx, iobuf_large_cache_size), spdk_json_decode_uint32, true},
+	{"ai_qos_enabled", offsetof(struct rpc_bdev_set_options_aiqos, ai_qos_enabled), spdk_json_decode_bool, true},
+	{"ai_qos_decision_mode", offsetof(struct rpc_bdev_set_options_aiqos, ai_qos_decision_mode), spdk_json_decode_int32, true},
 };
 
 static void
 rpc_bdev_set_options(struct spdk_jsonrpc_request *request, const struct spdk_json_val *params)
 {
 	struct rpc_bdev_set_options_ctx req = {};
+	struct rpc_bdev_set_options_aiqos aiqos_req = {};
 	struct spdk_bdev_opts opts;
 	int rc;
 
@@ -47,20 +56,45 @@ rpc_bdev_set_options(struct spdk_jsonrpc_request *request, const struct spdk_jso
 	req.bdev_auto_examine = opts.bdev_auto_examine;
 	req.iobuf_small_cache_size = opts.iobuf_small_cache_size;
 	req.iobuf_large_cache_size = opts.iobuf_large_cache_size;
+
+	/* Load AI-QoS default values from current opts */
+	aiqos_req.ai_qos_enabled = opts.ai_qos_enabled;
+	aiqos_req.ai_qos_decision_mode = opts.ai_qos_decision_mode;
+
 	if (params != NULL) {
+		/* Must allocate one combined struct for decode; use aiqos portion */
+		/* We decode into a combined blob: req + aiqos_req in a single allocation */
+		size_t total_size = sizeof(req) + sizeof(aiqos_req);
+		uint8_t *combined = calloc(1, total_size);
+		if (combined == NULL) {
+			spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+							 "Memory allocation failed");
+			return;
+		}
+		memcpy(combined, &req, sizeof(req));
+		memcpy(combined + sizeof(req), &aiqos_req, sizeof(aiqos_req));
+
 		if (spdk_json_decode_object(params, rpc_bdev_set_options_decoders,
-					    SPDK_COUNTOF(rpc_bdev_set_options_decoders), &req)) {
+					    SPDK_COUNTOF(rpc_bdev_set_options_decoders), combined)) {
 			SPDK_ERRLOG("spdk_json_decode_object() failed\n");
 			spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
 							 "Invalid parameters");
+			free(combined);
 			return;
 		}
+
+		memcpy(&req, combined, sizeof(req));
+		memcpy(&aiqos_req, combined + sizeof(req), sizeof(aiqos_req));
+		free(combined);
 	}
+
 	opts.bdev_io_pool_size = req.bdev_io_pool_size;
 	opts.bdev_io_cache_size = req.bdev_io_cache_size;
 	opts.bdev_auto_examine = req.bdev_auto_examine;
 	opts.iobuf_small_cache_size = req.iobuf_small_cache_size;
 	opts.iobuf_large_cache_size = req.iobuf_large_cache_size;
+	opts.ai_qos_enabled = aiqos_req.ai_qos_enabled;
+	opts.ai_qos_decision_mode = aiqos_req.ai_qos_decision_mode;
 
 	rc = spdk_bdev_set_opts(&opts);
 	if (rc != 0) {

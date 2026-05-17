@@ -232,8 +232,25 @@ struct spdk_bdev_opts {
 	/* Size of the per-thread iobuf caches */
 	uint32_t iobuf_small_cache_size;
 	uint32_t iobuf_large_cache_size;
+
+	/*
+	 * AI-QoS startup options
+	 */
+	/** Master switch: enable or disable all AI-QoS functionality */
+	bool ai_qos_enabled;
+
+	/*
+	 * AI-QoS decision mode:
+	 *   0 = auto (normal EMA/condition-driven decision)
+	 *   1 = forced-on (always active, ignore workload detection)
+	 *   2 = forced-off (always disabled, behaves like baseline)
+	 */
+	int ai_qos_decision_mode;
+
+	/* Padding to avoid ABI issues on 32-bit alignment */
+	uint8_t reserved_aiqos[2];
 } __attribute__((packed));
-SPDK_STATIC_ASSERT(sizeof(struct spdk_bdev_opts) == 32, "Incorrect size");
+SPDK_STATIC_ASSERT(sizeof(struct spdk_bdev_opts) == 39, "Incorrect size");
 
 /**
  * Controller attributes indicating optional bdev capabilities (e.g. Flexible Data Placement).

@@ -142,6 +142,13 @@ struct spdk_bdev_qos {
 	/** AI-QoS master enable flag */
 	bool				ai_qos_enabled;
 
+	/** AI-QoS decision mode:
+	 *  0 = auto (normal EMA/condition-driven)
+	 *  1 = forced-on (always active)
+	 *  2 = forced-off (always disabled)
+	 */
+	int				ai_qos_decision_mode;
+
 	/** Adaptive policy configuration */
 	struct spdk_bdev_qos_adaptive_cfg	adaptive_cfg;
 

@@ -1165,6 +1165,16 @@
           "name": "iobuf_large_cache_size",
           "type": "uint32",
           "description": "Size of the large iobuf per thread cache"
+        },
+        {
+          "name": "ai_qos_enabled",
+          "type": "boolean",
+          "description": "Master switch: enable or disable all AI-QoS functionality"
+        },
+        {
+          "name": "ai_qos_decision_mode",
+          "type": "int32",
+          "description": "AI-QoS decision mode: 0=auto (normal), 1=forced-on, 2=forced-off"
         }
       ]
     },

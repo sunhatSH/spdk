@@ -88,6 +88,9 @@ if [ -z "$LD" ]; then
 	if [ "$OS" = "FreeBSD" ]; then
 		LD=ld.lld
 	fi
+	if [ "$OS" = "Darwin" ]; then
+		LD=ld
+	fi
 fi
 
 CC_TYPE=$($CC -v 2>&1 | grep -o -E '\w+ version' | head -1 | awk '{ print $1 }')
@@ -97,7 +100,11 @@ if [ "$CC_TYPE" != "$CXX_TYPE" ]; then
 	err "This may result in errors"
 fi
 
-LD_TYPE=$($LD --version 2>&1 | head -n1 | awk '{print $1, $2}')
+if [ "$OS" = "Darwin" ]; then
+	LD_TYPE=$(ld -v 2>&1 | head -n1 | awk '{print $1, $2}')
+else
+	LD_TYPE=$($LD --version 2>&1 | head -n1 | awk '{print $1, $2}')
+fi
 case "$LD_TYPE" in
 	"GNU ld"*)
 		LD_TYPE=bfd
@@ -107,6 +114,9 @@ case "$LD_TYPE" in
 		;;
 	"LLD"*)
 		LD_TYPE=lld
+		;;
+	"@(#)PROGRAM:ld"*)
+		LD_TYPE=bfd
 		;;
 	*)
 		err "Unsupported linker: $LD"

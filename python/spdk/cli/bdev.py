@@ -44,7 +44,9 @@ def add_parser(subparsers):
                                   bdev_io_cache_size=args.bdev_io_cache_size,
                                   bdev_auto_examine=args.bdev_auto_examine,
                                   iobuf_small_cache_size=args.iobuf_small_cache_size,
-                                  iobuf_large_cache_size=args.iobuf_large_cache_size)
+                                  iobuf_large_cache_size=args.iobuf_large_cache_size,
+                                  ai_qos_enabled=args.ai_qos_enabled,
+                                  ai_qos_decision_mode=args.ai_qos_decision_mode)
 
     p = subparsers.add_parser('bdev_set_options',
                               help="""Set options of bdev subsystem""")
@@ -54,6 +56,10 @@ def add_parser(subparsers):
                    help='Enable or disable auto examine')
     p.add_argument('--iobuf-small-cache-size', help='Size of the small iobuf per thread cache', type=int)
     p.add_argument('--iobuf-large-cache-size', help='Size of the large iobuf per thread cache', type=int)
+    p.add_argument('--ai-qos-enabled', dest='ai_qos_enabled', action=argparse.BooleanOptionalAction,
+                   help='Enable or disable AI-QoS functionality (default: disabled)')
+    p.add_argument('--ai-qos-decision-mode', dest='ai_qos_decision_mode', type=int, choices=[0, 1, 2],
+                   help='AI-QoS decision mode: 0=auto, 1=forced-on, 2=forced-off (default: 0=auto)')
     p.set_defaults(func=bdev_set_options)
 
     def bdev_examine(args):

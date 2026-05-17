@@ -151,6 +151,8 @@ static struct spdk_bdev_opts	g_bdev_opts = {
 	.bdev_auto_examine = SPDK_BDEV_AUTO_EXAMINE,
 	.iobuf_small_cache_size = BUF_SMALL_CACHE_SIZE,
 	.iobuf_large_cache_size = BUF_LARGE_CACHE_SIZE,
+	.ai_qos_enabled = false,
+	.ai_qos_decision_mode = 0,
 };
 
 static spdk_bdev_init_cb	g_init_cb_fn = NULL;
@@ -443,10 +445,12 @@ spdk_bdev_get_opts(struct spdk_bdev_opts *opts, size_t opts_size)
 	SET_FIELD(bdev_auto_examine);
 	SET_FIELD(iobuf_small_cache_size);
 	SET_FIELD(iobuf_large_cache_size);
+	SET_FIELD(ai_qos_enabled);
+	SET_FIELD(ai_qos_decision_mode);
 
 	/* Do not remove this statement, you should always update this statement when you adding a new field,
 	 * and do not forget to add the SET_FIELD statement for your added field. */
-	SPDK_STATIC_ASSERT(sizeof(struct spdk_bdev_opts) == 32, "Incorrect size");
+	SPDK_STATIC_ASSERT(sizeof(struct spdk_bdev_opts) == 39, "Incorrect size");
 
 #undef SET_FIELD
 }
@@ -490,6 +494,8 @@ spdk_bdev_set_opts(struct spdk_bdev_opts *opts)
 	SET_FIELD(bdev_auto_examine);
 	SET_FIELD(iobuf_small_cache_size);
 	SET_FIELD(iobuf_large_cache_size);
+	SET_FIELD(ai_qos_enabled);
+	SET_FIELD(ai_qos_decision_mode);
 
 	g_bdev_opts.opts_size = opts->opts_size;
 
@@ -10084,6 +10090,18 @@ spdk_bdev_set_qos_rate_limits(struct spdk_bdev *bdev, uint64_t *limits,
 				acfg->yellow_mult = 0.75f;
 				acfg->red_mult = 0.30f;
 			}
+
+			/* Apply global AI-QoS startup options from bdev_opts */
+			bdev->internal.qos->ai_qos_enabled = g_bdev_opts.ai_qos_enabled;
+			bdev->internal.qos->ai_qos_decision_mode = g_bdev_opts.ai_qos_decision_mode;
+			if (g_bdev_opts.ai_qos_decision_mode == 1) {
+				/* forced-on: enable all AI-QoS features unconditionally */
+				bdev->internal.qos->ai_qos_enabled = true;
+			}
+			if (g_bdev_opts.ai_qos_decision_mode == 2) {
+				/* forced-off: disable AI-QoS even if RPC tries to enable */
+				bdev->internal.qos->ai_qos_enabled = false;
+			}
 			TAILQ_INIT(&bdev->internal.qos->urgent_queued_io);
 		}
 
@@ -10135,6 +10153,20 @@ spdk_bdev_set_ai_qos_policy(struct spdk_bdev *bdev, bool enabled,
 			cb_fn(cb_arg, -ENODEV);
 		}
 		return;
+	}
+
+	/* Check startup decision mode override */
+	if (qos->ai_qos_decision_mode == 2) {
+		/* forced-off: refuse any enable attempt */
+		SPDK_INFOLOG(bdev, "AI-QoS: forced-off by startup config, ignoring set_policy\n");
+		if (cb_fn) {
+			cb_fn(cb_arg, -EPERM);
+		}
+		return;
+	}
+	if (qos->ai_qos_decision_mode == 1) {
+		/* forced-on: always report as enabled */
+		enabled = true;
 	}
 
 	spdk_spin_lock(&bdev->internal.spinlock);

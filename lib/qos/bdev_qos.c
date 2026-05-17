@@ -395,9 +395,22 @@ bdev_qos_adaptive_adjust(struct spdk_bdev_qos *qos)
 	float multiplier = 1.0f;
 	int i;
 
-	if (!qos->ai_qos_enabled || !acfg->enabled) {
+	/* Check decision mode:
+	 *  0 = auto (normal) — check ai_qos_enabled + acfg->enabled
+	 *  1 = forced-on — bypass checks, algorithm always active
+	 *  2 = forced-off — never run adaptive adjust
+	 */
+	if (qos->ai_qos_decision_mode == 2) {
+		/* forced-off: never adjust */
 		return;
 	}
+	if (qos->ai_qos_decision_mode == 0) {
+		/* auto: normal check */
+		if (!qos->ai_qos_enabled || !acfg->enabled) {
+			return;
+		}
+	}
+	/* forced-on (mode == 1): skip the enabled check, always run */
 
 	/* Determine the most severe condition */
 	worst = qos->cond_snap.disk_level;
@@ -630,9 +643,18 @@ bdev_qos_cond_poller(void *arg)
 {
 	struct spdk_bdev_qos *qos = arg;
 
-	if (!qos->ai_qos_enabled || !qos->adaptive_cfg.enabled) {
+	/* forced-off (mode == 2): never run the poller */
+	if (qos->ai_qos_decision_mode == 2) {
 		return SPDK_POLLER_IDLE;
 	}
+
+	/* auto (mode == 0): check ai_qos_enabled */
+	if (qos->ai_qos_decision_mode == 0) {
+		if (!qos->ai_qos_enabled || !qos->adaptive_cfg.enabled) {
+			return SPDK_POLLER_IDLE;
+		}
+	}
+	/* forced-on (mode == 1): skip the check, always run */
 
 	/* The actual snapshot collection is done by the bdev layer integration
 	 * code (in bdev.c) which has access to bdev-level stats.
