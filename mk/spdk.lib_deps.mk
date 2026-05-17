@@ -63,7 +63,8 @@ DEPDIRS-net := log util $(JSON_LIBS)
 DEPDIRS-notify := log util $(JSON_LIBS)
 DEPDIRS-trace := log util $(JSON_LIBS)
 
-DEPDIRS-bdev := accel log util thread $(JSON_LIBS) notify trace dma
+DEPDIRS-bdev := bdev_qos accel log util thread $(JSON_LIBS) notify trace dma
+DEPDIRS-bdev_qos := log util thread
 DEPDIRS-event := log util thread $(JSON_LIBS) trace init
 DEPDIRS-init := jsonrpc json log rpc thread util
 DEPDIRS-ftl := log util thread bdev json jsonrpc

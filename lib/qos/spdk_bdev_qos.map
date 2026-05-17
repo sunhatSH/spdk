@@ -1,0 +1,7 @@
+{
+	global:
+		# No public symbols exported directly from this module.
+		# All entries are linked internally through bdev.
+
+	local: *;
+};

@@ -28,6 +28,7 @@
 #include "bdev_internal.h"
 #include "spdk_internal/trace_defs.h"
 #include "spdk_internal/assert.h"
+#include "../qos/bdev_qos.h"
 
 #ifdef SPDK_CONFIG_VTUNE
 #include "ittnotify.h"
@@ -42,13 +43,9 @@ int __itt_init_ittlib(const char *, __itt_group_id);
 #define BUF_LARGE_CACHE_SIZE			16
 #define NOMEM_THRESHOLD_COUNT			8
 
-#define SPDK_BDEV_QOS_TIMESLICE_IN_USEC		1000
-#define SPDK_BDEV_QOS_MIN_IO_PER_TIMESLICE	1
-#define SPDK_BDEV_QOS_MIN_BYTE_PER_TIMESLICE	512
 #define SPDK_BDEV_QOS_MIN_IOS_PER_SEC		1000
 #define SPDK_BDEV_QOS_MIN_BYTES_PER_SEC		(1024 * 1024)
 #define SPDK_BDEV_QOS_MAX_MBYTES_PER_SEC	(UINT64_MAX / (1024 * 1024))
-#define SPDK_BDEV_QOS_LIMIT_NOT_DEFINED		UINT64_MAX
 
 /* The maximum number of children requests for a UNMAP or WRITE ZEROES command
  * when splitting into children requests at a time.
@@ -158,135 +155,6 @@ static spdk_bdev_fini_cb	g_fini_cb_fn = NULL;
 static void			*g_fini_cb_arg = NULL;
 static struct spdk_thread	*g_fini_thread = NULL;
 
-struct spdk_bdev_qos_limit {
-	/** IOs or bytes allowed per second (i.e., 1s). */
-	uint64_t limit;
-
-	/** Remaining IOs or bytes allowed in current timeslice (e.g., 1ms).
-	 *  For remaining bytes, allowed to run negative if an I/O is submitted when
-	 *  some bytes are remaining, but the I/O is bigger than that amount. The
-	 *  excess will be deducted from the next timeslice.
-	 */
-	int64_t remaining_this_timeslice;
-
-	/** Minimum allowed IOs or bytes to be issued in one timeslice (e.g., 1ms). */
-	uint32_t min_per_timeslice;
-
-	/** Maximum allowed IOs or bytes to be issued in one timeslice (e.g., 1ms). */
-	uint32_t max_per_timeslice;
-
-	/** Function to check whether to queue the IO.
-	 * If The IO is allowed to pass, the quota will be reduced correspondingly.
-	 */
-	bool (*queue_io)(struct spdk_bdev_qos_limit *limit, struct spdk_bdev_io *io);
-
-	/** Function to rewind the quota once the IO was allowed to be sent by this
-	 * limit but queued due to one of the further limits.
-	 */
-	void (*rewind_quota)(struct spdk_bdev_qos_limit *limit, struct spdk_bdev_io *io);
-};
-
-/** AI-QoS: adaptive policy configuration */
-struct spdk_bdev_qos_adaptive_cfg {
-	bool		enabled;
-	uint32_t	check_interval_us;		/* default 100ms */
-
-	/* Thresholds */
-	uint64_t	disk_lat_yellow_ticks;		/* 100us */
-	uint64_t	disk_lat_red_ticks;		/* 500us */
-	float		mem_pressure_yellow;		/* 0.70 */
-	float		mem_pressure_red;		/* 0.90 */
-	uint32_t	queue_depth_yellow;		/* 128 */
-	uint32_t	queue_depth_red;		/* 512 */
-	uint64_t	queue_wait_yellow_ticks;	/* 200us */
-	uint64_t	queue_wait_red_ticks;		/* 1ms */
-
-	/* Multipliers (applied to base limits) */
-	float		yellow_mult;			/* 0.75 */
-	float		red_mult;			/* 0.30 */
-};
-
-/** AI-QoS: urgent I/O configuration */
-struct spdk_bdev_qos_urgent_cfg {
-	bool		enabled;
-	uint64_t	token_hash;			/* stored token hash for verification */
-	uint64_t	token_expiry;			/* token expiry tsc ticks */
-	uint32_t	max_urgent_per_timeslice;	/* max urgent IOs per 1ms timeslice */
-	uint64_t	max_urgent_bytes_per_ts;	/* max urgent bytes per timeslice */
-	uint32_t	max_urgent_per_sec;		/* max urgent IOs per second */
-};
-
-/** AI-QoS: condition snapshot from monitoring */
-struct spdk_bdev_qos_cond_snapshot {
-	/* Disk */
-	uint64_t	disk_latency_p99_ticks;
-	uint32_t	disk_queue_depth;
-	/* Memory */
-	uint64_t	mem_pool_free_cnt;		/* free items in bdev_io_pool */
-	uint64_t	mem_pool_total_cnt;
-	/* Queue */
-	uint32_t	qos_queue_depth;		/* total queued across all channels */
-	uint64_t	qos_queue_oldest_wait_ticks;
-	/* Aggregate levels */
-	enum spdk_bdev_qos_cond_level disk_level;
-	enum spdk_bdev_qos_cond_level mem_level;
-	enum spdk_bdev_qos_cond_level queue_level;
-};
-
-struct spdk_bdev_qos {
-	/** Types of structure of rate limits. */
-	struct spdk_bdev_qos_limit rate_limits[SPDK_BDEV_QOS_NUM_RATE_LIMIT_TYPES];
-
-	/** The channel that all I/O are funneled through. */
-	struct spdk_bdev_channel *ch;
-
-	/** The thread on which the poller is running. */
-	struct spdk_thread *thread;
-
-	/** Size of a timeslice in tsc ticks. */
-	uint64_t timeslice_size;
-
-	/** Timestamp of start of last timeslice. */
-	uint64_t last_timeslice;
-
-	/** Poller that processes queued I/O commands each time slice. */
-	struct spdk_poller *poller;
-
-	/* === AI-QoS fields === */
-
-	/** AI-QoS master enable flag */
-	bool				ai_qos_enabled;
-
-	/** Adaptive policy configuration */
-	struct spdk_bdev_qos_adaptive_cfg	adaptive_cfg;
-
-	/** Latest condition snapshot */
-	struct spdk_bdev_qos_cond_snapshot	cond_snap;
-
-	/** Condition monitoring poller */
-	struct spdk_poller			*cond_poller;
-
-	/** Base rate limits (before adaptive adjustment) */
-	uint64_t				base_limits[SPDK_BDEV_QOS_NUM_RATE_LIMIT_TYPES];
-
-	/** Urgent I/O configuration */
-	struct spdk_bdev_qos_urgent_cfg		urgent_cfg;
-
-	/** Urgent IO counter for current timeslice */
-	int32_t					urgent_count_this_ts;
-
-	/** Urgent byte counter for current timeslice */
-	uint64_t				urgent_bytes_this_ts;
-
-	/** Timestamp when urgent per-second tracking started */
-	uint64_t				urgent_sec_start_ticks;
-
-	/** Urgent IOs submitted this second */
-	int32_t					urgent_count_this_sec;
-
-	/** Urgent IO priority queue (drained before normal qos queue) */
-	TAILQ_HEAD(, spdk_bdev_io)		urgent_queued_io;
-};
 
 struct spdk_bdev_mgmt_channel {
 	/*
@@ -2781,225 +2649,6 @@ spdk_bdev_free_io(struct spdk_bdev_io *bdev_io)
 	}
 }
 
-static bool
-bdev_qos_is_iops_rate_limit(enum spdk_bdev_qos_rate_limit_type limit)
-{
-	assert(limit != SPDK_BDEV_QOS_NUM_RATE_LIMIT_TYPES);
-
-	switch (limit) {
-	case SPDK_BDEV_QOS_RW_IOPS_RATE_LIMIT:
-		return true;
-	case SPDK_BDEV_QOS_RW_BPS_RATE_LIMIT:
-	case SPDK_BDEV_QOS_R_BPS_RATE_LIMIT:
-	case SPDK_BDEV_QOS_W_BPS_RATE_LIMIT:
-		return false;
-	case SPDK_BDEV_QOS_NUM_RATE_LIMIT_TYPES:
-	default:
-		return false;
-	}
-}
-
-static bool
-bdev_qos_io_to_limit(struct spdk_bdev_io *bdev_io)
-{
-	switch (bdev_io->type) {
-	case SPDK_BDEV_IO_TYPE_NVME_IO:
-	case SPDK_BDEV_IO_TYPE_NVME_IO_MD:
-	case SPDK_BDEV_IO_TYPE_READ:
-	case SPDK_BDEV_IO_TYPE_WRITE:
-		return true;
-	case SPDK_BDEV_IO_TYPE_ZCOPY:
-		if (bdev_io->u.bdev.zcopy.start) {
-			return true;
-		} else {
-			return false;
-		}
-	default:
-		return false;
-	}
-}
-
-static bool
-bdev_is_read_io(struct spdk_bdev_io *bdev_io)
-{
-	switch (bdev_io->type) {
-	case SPDK_BDEV_IO_TYPE_NVME_IO:
-	case SPDK_BDEV_IO_TYPE_NVME_IO_MD:
-		/* Bit 1 (0x2) set for read operation */
-		if (bdev_io->u.nvme_passthru.cmd.opc & SPDK_NVME_OPC_READ) {
-			return true;
-		} else {
-			return false;
-		}
-	case SPDK_BDEV_IO_TYPE_READ:
-		return true;
-	case SPDK_BDEV_IO_TYPE_ZCOPY:
-		/* Populate to read from disk */
-		if (bdev_io->u.bdev.zcopy.populate) {
-			return true;
-		} else {
-			return false;
-		}
-	default:
-		return false;
-	}
-}
-
-static uint64_t
-bdev_get_io_size_in_byte(struct spdk_bdev_io *bdev_io)
-{
-	uint32_t blocklen = bdev_io_get_block_size(bdev_io);
-
-	switch (bdev_io->type) {
-	case SPDK_BDEV_IO_TYPE_NVME_IO:
-	case SPDK_BDEV_IO_TYPE_NVME_IO_MD:
-		return bdev_io->u.nvme_passthru.nbytes;
-	case SPDK_BDEV_IO_TYPE_READ:
-	case SPDK_BDEV_IO_TYPE_WRITE:
-		return bdev_io->u.bdev.num_blocks * blocklen;
-	case SPDK_BDEV_IO_TYPE_ZCOPY:
-		/* Track the data in the start phase only */
-		if (bdev_io->u.bdev.zcopy.start) {
-			return bdev_io->u.bdev.num_blocks * blocklen;
-		} else {
-			return 0;
-		}
-	default:
-		return 0;
-	}
-}
-
-static inline bool
-bdev_qos_rw_queue_io(struct spdk_bdev_qos_limit *limit, struct spdk_bdev_io *io, uint64_t delta)
-{
-	int64_t remaining_this_timeslice;
-
-	if (!limit->max_per_timeslice) {
-		/* The QoS is disabled */
-		return false;
-	}
-
-	remaining_this_timeslice = __atomic_sub_fetch(&limit->remaining_this_timeslice, delta,
-				   __ATOMIC_RELAXED);
-	if (remaining_this_timeslice + (int64_t)delta > 0) {
-		/* There was still a quota for this delta -> the IO shouldn't be queued
-		 *
-		 * We allow a slight quota overrun here so an IO bigger than the per-timeslice
-		 * quota can be allowed once a while. Such overrun then taken into account in
-		 * the QoS poller, where the next timeslice quota is calculated.
-		 */
-		return false;
-	}
-
-	/* There was no quota for this delta -> the IO should be queued
-	 * The remaining_this_timeslice must be rewinded so it reflects the real
-	 * amount of IOs or bytes allowed.
-	 */
-	__atomic_add_fetch(
-		&limit->remaining_this_timeslice, delta, __ATOMIC_RELAXED);
-	return true;
-}
-
-static inline void
-bdev_qos_rw_rewind_io(struct spdk_bdev_qos_limit *limit, struct spdk_bdev_io *io, uint64_t delta)
-{
-	__atomic_add_fetch(&limit->remaining_this_timeslice, delta, __ATOMIC_RELAXED);
-}
-
-static bool
-bdev_qos_rw_iops_queue(struct spdk_bdev_qos_limit *limit, struct spdk_bdev_io *io)
-{
-	return bdev_qos_rw_queue_io(limit, io, 1);
-}
-
-static void
-bdev_qos_rw_iops_rewind_quota(struct spdk_bdev_qos_limit *limit, struct spdk_bdev_io *io)
-{
-	bdev_qos_rw_rewind_io(limit, io, 1);
-}
-
-static bool
-bdev_qos_rw_bps_queue(struct spdk_bdev_qos_limit *limit, struct spdk_bdev_io *io)
-{
-	return bdev_qos_rw_queue_io(limit, io, bdev_get_io_size_in_byte(io));
-}
-
-static void
-bdev_qos_rw_bps_rewind_quota(struct spdk_bdev_qos_limit *limit, struct spdk_bdev_io *io)
-{
-	bdev_qos_rw_rewind_io(limit, io, bdev_get_io_size_in_byte(io));
-}
-
-static bool
-bdev_qos_r_bps_queue(struct spdk_bdev_qos_limit *limit, struct spdk_bdev_io *io)
-{
-	if (bdev_is_read_io(io) == false) {
-		return false;
-	}
-
-	return bdev_qos_rw_bps_queue(limit, io);
-}
-
-static void
-bdev_qos_r_bps_rewind_quota(struct spdk_bdev_qos_limit *limit, struct spdk_bdev_io *io)
-{
-	if (bdev_is_read_io(io) != false) {
-		bdev_qos_rw_rewind_io(limit, io, bdev_get_io_size_in_byte(io));
-	}
-}
-
-static bool
-bdev_qos_w_bps_queue(struct spdk_bdev_qos_limit *limit, struct spdk_bdev_io *io)
-{
-	if (bdev_is_read_io(io) == true) {
-		return false;
-	}
-
-	return bdev_qos_rw_bps_queue(limit, io);
-}
-
-static void
-bdev_qos_w_bps_rewind_quota(struct spdk_bdev_qos_limit *limit, struct spdk_bdev_io *io)
-{
-	if (bdev_is_read_io(io) != true) {
-		bdev_qos_rw_rewind_io(limit, io, bdev_get_io_size_in_byte(io));
-	}
-}
-
-static void
-bdev_qos_set_ops(struct spdk_bdev_qos *qos)
-{
-	int i;
-
-	for (i = 0; i < SPDK_BDEV_QOS_NUM_RATE_LIMIT_TYPES; i++) {
-		if (qos->rate_limits[i].limit == SPDK_BDEV_QOS_LIMIT_NOT_DEFINED) {
-			qos->rate_limits[i].queue_io = NULL;
-			continue;
-		}
-
-		switch (i) {
-		case SPDK_BDEV_QOS_RW_IOPS_RATE_LIMIT:
-			qos->rate_limits[i].queue_io = bdev_qos_rw_iops_queue;
-			qos->rate_limits[i].rewind_quota = bdev_qos_rw_iops_rewind_quota;
-			break;
-		case SPDK_BDEV_QOS_RW_BPS_RATE_LIMIT:
-			qos->rate_limits[i].queue_io = bdev_qos_rw_bps_queue;
-			qos->rate_limits[i].rewind_quota = bdev_qos_rw_bps_rewind_quota;
-			break;
-		case SPDK_BDEV_QOS_R_BPS_RATE_LIMIT:
-			qos->rate_limits[i].queue_io = bdev_qos_r_bps_queue;
-			qos->rate_limits[i].rewind_quota = bdev_qos_r_bps_rewind_quota;
-			break;
-		case SPDK_BDEV_QOS_W_BPS_RATE_LIMIT:
-			qos->rate_limits[i].queue_io = bdev_qos_w_bps_queue;
-			qos->rate_limits[i].rewind_quota = bdev_qos_w_bps_rewind_quota;
-			break;
-		default:
-			break;
-		}
-	}
-}
-
 static void
 _bdev_io_complete_in_submit(struct spdk_bdev_channel *bdev_ch,
 			    struct spdk_bdev_io *bdev_io,
@@ -3052,34 +2701,6 @@ bdev_io_do_submit(struct spdk_bdev_channel *bdev_ch, struct spdk_bdev_io *bdev_i
 			bdev_shared_ch_retry_io(shared_resource);
 		}
 	}
-}
-
-static bool
-bdev_qos_queue_io(struct spdk_bdev_qos *qos, struct spdk_bdev_io *bdev_io)
-{
-	int i;
-
-	if (bdev_qos_io_to_limit(bdev_io) == true) {
-		for (i = 0; i < SPDK_BDEV_QOS_NUM_RATE_LIMIT_TYPES; i++) {
-			if (!qos->rate_limits[i].queue_io) {
-				continue;
-			}
-
-			if (qos->rate_limits[i].queue_io(&qos->rate_limits[i],
-							 bdev_io) == true) {
-				for (i -= 1; i >= 0 ; i--) {
-					if (!qos->rate_limits[i].queue_io) {
-						continue;
-					}
-
-					qos->rate_limits[i].rewind_quota(&qos->rate_limits[i], bdev_io);
-				}
-				return true;
-			}
-		}
-	}
-
-	return false;
 }
 
 static int
@@ -4200,31 +3821,6 @@ spdk_bdev_dump_info_json(struct spdk_bdev *bdev, struct spdk_json_write_ctx *w)
 	}
 
 	return 0;
-}
-
-static void
-bdev_qos_update_max_quota_per_timeslice(struct spdk_bdev_qos *qos)
-{
-	uint32_t max_per_timeslice = 0;
-	int i;
-
-	for (i = 0; i < SPDK_BDEV_QOS_NUM_RATE_LIMIT_TYPES; i++) {
-		if (qos->rate_limits[i].limit == SPDK_BDEV_QOS_LIMIT_NOT_DEFINED) {
-			qos->rate_limits[i].max_per_timeslice = 0;
-			continue;
-		}
-
-		max_per_timeslice = qos->rate_limits[i].limit *
-				    SPDK_BDEV_QOS_TIMESLICE_IN_USEC / SPDK_SEC_TO_USEC;
-
-		qos->rate_limits[i].max_per_timeslice = spdk_max(max_per_timeslice,
-							qos->rate_limits[i].min_per_timeslice);
-
-		__atomic_store_n(&qos->rate_limits[i].remaining_this_timeslice,
-				 qos->rate_limits[i].max_per_timeslice, __ATOMIC_RELEASE);
-	}
-
-	bdev_qos_set_ops(qos);
 }
 
 static void
