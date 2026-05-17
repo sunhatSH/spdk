@@ -277,6 +277,95 @@ automatically built as part of the build process. Python package is also publish
 to <https://pypi.org/project/spdk/> every release for ease of consumption. For more
 details, check the [README](./python/README.md).
 
+
+<a id="aiqos"></a>
+## AI-QoS Module (`ai-qos-v1` branch)
+
+SPDK-based AI-QoS (Quality of Service) — a system that dynamically adjusts
+storage QoS policies based on AI workload characteristics.
+
+### Architecture
+
+```
+lib/qos/                  ← Independent AI-QoS module (900 lines)
+  ├── bdev_qos.h          ← Data structures, public API
+  └── bdev_qos.c          ← Core logic: EMA tracking, condition monitoring,
+                             urgent I/O, adaptive rate limiting
+include/spdk/bdev.h       ← Extended public API (3 new RPC declarations)
+lib/bdev/
+  ├── bdev.c              ← Urgent I/O integration, condition poller hook
+  └── bdev_rpc.c          ← 3 new RPC handlers
+test/ai_qos/
+  ├── test_ai_qos_workload.c  ← 12 unit tests
+  └── integration/
+      ├── ai_qos_sim.py       ← Python simulator (unified experiments + plots)
+      ├── generate_8_plots.py ← 8 individual experiment plots
+      ├── run_perf.sh         ← One-click performance benchmark runner
+      └── results/            ← Benchmark data + plots
+schema/schema.json        ← RPC schema (3 new methods)
+python/spdk/cli/bdev.py   ← CLI bindings
+copyright/                ← Copyright application materials
+```
+
+### Key Innovations
+
+| Feature | Algorithm |
+|---------|-----------|
+| **AI Workload Detection** | EMA (`alpha/256`) tracks I/O size trends; continuous counter resets on small I/O to reject noise |
+| **Condition Monitoring** | 100ms poller evaluates EMA: GREEN (<32KB), YELLOW (32-128KB), RED (>128KB) |
+| **Adaptive Rate Limit** | Base limits × condition multiplier: GREEN=1.0, YELLOW=0.6, RED=0.3 |
+| **Urgent I/O Bypass** | SHA-256 token auth + per-timeslice quota + per-second cap |
+| **Auto-Urgent** | Queue depth threshold triggers 10ms activation window |
+
+### Usage
+
+```bash
+# Run full benchmark suite (8 experiments + plots)
+cd test/ai_qos/integration && ./run_perf.sh
+
+# Decision control modes
+./run_perf.sh --mode forced-on      # Force AI-QoS always active
+./run_perf.sh --mode forced-off     # Force AI-QoS disabled
+./run_perf.sh --mode auto           # Normal AI-QoS decision logic
+
+# Run single experiments by index (0-7)
+./run_perf.sh --single 0 4
+
+# Regenerate plots from existing data only
+./run_perf.sh --plot-only
+
+# Clean cached data and re-run from scratch
+./run_perf.sh --clean
+
+# Direct use of Python simulator
+python3 ai_qos_sim.py --experiment 5 --mode forced-on
+```
+
+Experiment indices:
+- `0` = Baseline, No Urgent, Random
+- `1` = Baseline, No Urgent, AI Workload
+- `2` = Baseline, With Urgent, Random
+- `3` = Baseline, With Urgent, AI Workload
+- `4` = **AI-QoS**, No Urgent, Random
+- `5` = **AI-QoS**, No Urgent, AI Workload
+- `6` = **AI-QoS**, With Urgent, Random
+- `7` = **AI-QoS**, With Urgent, AI Workload
+
+### Code Statistics
+
+| Module | Type | Inserted | Deleted | Net |
+|--------|------|----------|---------|-----|
+| `lib/qos/` | New module | 900 | 0 | +900 |
+| `lib/bdev/` | Modified | 394 | 325 | +69 |
+| `include/` | Modified | 57 | 2 | +55 |
+| `test/ai_qos/` | New tests | 1,588 | 0 | +1,588 |
+| `python/` | CLI bindings | 47 | 0 | +47 |
+| `schema/` | RPC schema | 70 | 0 | +70 |
+| `copyright/` | Documents | 117 | 0 | +117 |
+| **Total (source)** | | **3,176** | **329** | **+2,847** |
+
+12 commits on branch `ai-qos-v1`, based on upstream `f786c6d75`.
+
 <a id="contributing"></a>
 ## Contributing
 
