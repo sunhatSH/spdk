@@ -58,6 +58,14 @@ struct spdk_bdev_qos_urgent_cfg {
 	uint32_t	max_urgent_per_sec;	/* max urgent IOs per second */
 };
 
+/** AI-QoS: auto-urgent configuration (self-detected queue congestion) */
+struct spdk_bdev_qos_auto_urgent_cfg {
+	bool		enabled;
+	uint32_t	queue_depth_threshold;	/* queue depth that triggers auto-urgent */
+	uint32_t	consecutive_polls;	/* how many consecutive 1ms polls at threshold */
+	uint32_t	max_auto_urgent_per_ts;	/* max auto-urgent IOs per 1ms timeslice */
+};
+
 /** AI-QoS: condition snapshot */
 struct spdk_bdev_qos_cond_snapshot {
 	/* Disk */
@@ -127,6 +135,15 @@ struct spdk_bdev_qos {
 	uint64_t				urgent_bytes_this_ts;
 	uint64_t				urgent_sec_start_ticks;
 	int32_t					urgent_count_this_sec;
+
+	/** Total IOs queued across all channels (approximate, atomics) */
+	int64_t					total_queued_io_count;
+
+	/** Auto-urgent: self-detected queue congestion bypass */
+	struct spdk_bdev_qos_auto_urgent_cfg	auto_urgent_cfg;
+	bool					auto_urgent_active;
+	uint32_t				auto_urgent_consecutive;
+	uint32_t				auto_urgent_count_this_ts;
 
 	/** Urgent IO priority queue (drained before normal qos queue) */
 	TAILQ_HEAD(, spdk_bdev_io)		urgent_queued_io;

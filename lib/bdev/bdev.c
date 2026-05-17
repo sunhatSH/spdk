@@ -2676,6 +2676,17 @@ bdev_qos_io_submit(struct spdk_bdev_channel *ch, struct spdk_bdev_qos *qos)
 	TAILQ_FOREACH_SAFE(bdev_io, &ch->qos_queued_io, internal.link, tmp) {
 		if (!bdev_qos_queue_io(qos, bdev_io)) {
 			TAILQ_REMOVE(&ch->qos_queued_io, bdev_io, internal.link);
+			__atomic_sub_fetch(&qos->total_queued_io_count, 1, __ATOMIC_RELAXED);
+			bdev_io_do_submit(ch, bdev_io);
+
+			submitted_ios++;
+		} else if (qos->auto_urgent_active &&
+			   qos->auto_urgent_count_this_ts <
+			   qos->auto_urgent_cfg.max_auto_urgent_per_ts) {
+			/* Auto-urgent bypass: submit despite rate limit quota exhaustion */
+			TAILQ_REMOVE(&ch->qos_queued_io, bdev_io, internal.link);
+			__atomic_sub_fetch(&qos->total_queued_io_count, 1, __ATOMIC_RELAXED);
+			qos->auto_urgent_count_this_ts++;
 			bdev_io_do_submit(ch, bdev_io);
 
 			submitted_ios++;
@@ -3418,6 +3429,7 @@ _bdev_io_submit(struct spdk_bdev_io *bdev_io)
 			_bdev_io_complete_in_submit(bdev_ch, bdev_io, SPDK_BDEV_IO_STATUS_SUCCESS);
 		} else {
 			TAILQ_INSERT_TAIL(&bdev_ch->qos_queued_io, bdev_io, internal.link);
+			__atomic_add_fetch(&qos->total_queued_io_count, 1, __ATOMIC_RELAXED);
 			bdev_qos_io_submit(bdev_ch, qos);
 		}
 	} else {
@@ -3945,6 +3957,33 @@ bdev_channel_poll_qos(void *arg)
 	}
 
 	bdev_qos_urgent_io_drain(qos);
+
+	/* ========== AI-QoS: Auto-urgent detection ==========
+	 * If the QoS queue has been persistently deep for consecutive polls,
+	 * activate auto-urgent mode to bypass rate limits temporarily.
+	 */
+	qos->auto_urgent_count_this_ts = 0;
+	if (qos->auto_urgent_cfg.enabled) {
+		int64_t qd = __atomic_load_n(&qos->total_queued_io_count, __ATOMIC_RELAXED);
+		if (qd >= (int64_t)qos->auto_urgent_cfg.queue_depth_threshold) {
+			qos->auto_urgent_consecutive++;
+			if (qos->auto_urgent_consecutive >= qos->auto_urgent_cfg.consecutive_polls) {
+				if (!qos->auto_urgent_active) {
+					qos->auto_urgent_active = true;
+					SPDK_DEBUGLOG(bdev, "AI-QoS: auto-urgent activated (qd=%"PRId64")\n", qd);
+				}
+			}
+		} else {
+			if (qos->auto_urgent_active) {
+				SPDK_DEBUGLOG(bdev, "AI-QoS: auto-urgent deactivated (qd=%"PRId64")\n", qd);
+			}
+			qos->auto_urgent_consecutive = 0;
+			qos->auto_urgent_active = false;
+		}
+	} else {
+		qos->auto_urgent_consecutive = 0;
+		qos->auto_urgent_active = false;
+	}
 
 	return SPDK_POLLER_BUSY;
 }

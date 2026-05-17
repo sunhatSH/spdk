@@ -309,6 +309,15 @@ bdev_qos_cond_snapshot_init(struct spdk_bdev_qos *qos)
 
 	/* Initialize urgent queue */
 	TAILQ_INIT(&qos->urgent_queued_io);
+
+	/* Set defaults for auto-urgent configuration */
+	qos->auto_urgent_cfg.enabled = false;
+	qos->auto_urgent_cfg.queue_depth_threshold = 64;
+	qos->auto_urgent_cfg.consecutive_polls = 10; /* 10ms at 1ms poll */
+	qos->auto_urgent_cfg.max_auto_urgent_per_ts = 32;
+	qos->auto_urgent_active = false;
+	qos->auto_urgent_consecutive = 0;
+	qos->auto_urgent_count_this_ts = 0;
 }
 
 void
