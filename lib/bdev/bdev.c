@@ -9974,6 +9974,13 @@ bdev_set_qos_rate_limits(struct spdk_bdev *bdev, uint64_t *limits)
 			}
 		}
 	}
+
+	/* Sync base_limits for AI-QoS adaptive engine */
+	for (i = 0; i < SPDK_BDEV_QOS_NUM_RATE_LIMIT_TYPES; i++) {
+		if (limits[i] != SPDK_BDEV_QOS_LIMIT_NOT_DEFINED) {
+			bdev->internal.qos->base_limits[i] = limits[i];
+		}
+	}
 }
 
 void
@@ -10092,6 +10099,12 @@ spdk_bdev_set_qos_rate_limits(struct spdk_bdev *bdev, uint64_t *limits,
 
 			spdk_thread_send_msg(bdev->internal.qos->thread,
 					     bdev_update_qos_rate_limit_msg, ctx);
+		}
+
+		/* If AI-QoS adaptive mode is active, re-apply using new base limits */
+		if (bdev->internal.qos->ai_qos_enabled &&
+		    bdev->internal.qos->adaptive_cfg.enabled) {
+			bdev_qos_adaptive_adjust(bdev->internal.qos);
 		}
 	} else {
 		if (bdev->internal.qos != NULL) {
