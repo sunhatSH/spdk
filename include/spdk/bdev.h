@@ -156,6 +156,16 @@ enum spdk_bdev_qos_rate_limit_type {
 	SPDK_BDEV_QOS_NUM_RATE_LIMIT_TYPES
 };
 
+/** AI-QoS: system condition level for adaptive rate limiting */
+enum spdk_bdev_qos_cond_level {
+	/** System is healthy, use base limits */
+	SPDK_BDEV_QOS_COND_GREEN = 0,
+	/** Moderate pressure, reduce limits */
+	SPDK_BDEV_QOS_COND_YELLOW,
+	/** Severe pressure, reduce limits aggressively */
+	SPDK_BDEV_QOS_COND_RED,
+};
+
 /**
  * Block device completion callback.
  *
@@ -841,6 +851,47 @@ void spdk_bdev_get_qos_rate_limits(struct spdk_bdev *bdev, uint64_t *limits);
  */
 void spdk_bdev_set_qos_rate_limits(struct spdk_bdev *bdev, uint64_t *limits,
 				   void (*cb_fn)(void *cb_arg, int status), void *cb_arg);
+
+/**
+ * AI-QoS: Set adaptive QoS policy parameters.
+ *
+ * \param bdev Block device.
+ * \param enabled Enable or disable adaptive rate limiting.
+ * \param check_interval_us Condition check interval in microseconds.
+ * \param cb_fn Callback function.
+ * \param cb_arg Argument to pass to cb_fn.
+ */
+void spdk_bdev_set_ai_qos_policy(struct spdk_bdev *bdev, bool enabled,
+				 uint32_t check_interval_us,
+				 void (*cb_fn)(void *cb_arg, int status), void *cb_arg);
+
+/**
+ * AI-QoS: Configure urgent I/O token and limits.
+ *
+ * \param bdev Block device.
+ * \param enabled Enable or disable urgent I/O.
+ * \param token 64-bit token value for urgent I/O authentication.
+ * \param expiry_ticks Token expiry timestamp in tsc ticks.
+ * \param max_burst_ios_per_ts Max urgent IOs per timeslice.
+ * \param max_burst_bytes_per_ts Max urgent bytes per timeslice.
+ * \param cb_fn Callback function.
+ * \param cb_arg Argument to pass to cb_fn.
+ */
+void spdk_bdev_set_urgent_config(struct spdk_bdev *bdev, bool enabled,
+				 uint64_t token, uint64_t expiry_ticks,
+				 uint32_t max_burst_ios_per_ts,
+				 uint64_t max_burst_bytes_per_ts,
+				 void (*cb_fn)(void *cb_arg, int status), void *cb_arg);
+
+/**
+ * AI-QoS: Get current system condition snapshot.
+ *
+ * \param bdev Block device.
+ * \param cond_level Output: current overall condition level.
+ * \return 0 on success, negative errno on failure.
+ */
+int spdk_bdev_get_qos_conditions(struct spdk_bdev *bdev,
+				 enum spdk_bdev_qos_cond_level *cond_level);
 
 /**
  * Get minimum I/O buffer address alignment for a bdev.

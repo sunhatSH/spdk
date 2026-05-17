@@ -981,7 +981,8 @@ struct spdk_bdev_io_internal_fields {
 			/** Whether the I/O is a sub-I/O of a split parent I/O */
 			uint8_t child_io		: 1;
 
-			uint8_t reserved			: 1;
+			/** AI-QoS: urgent I/O flag, bypasses normal rate limits when set */
+			uint8_t urgent			: 1;
 		};
 		uint8_t raw;
 	} f;
@@ -992,7 +993,10 @@ struct spdk_bdev_io_internal_fields {
 	/** Retry state (resubmit, re-pull, re-push, etc.) */
 	uint8_t retry_state;
 
-	uint8_t	reserved[5];
+	/** AI-QoS: urgent token check value (hashed token, 0 == no urgent allowed) */
+	uint8_t urgent_token_check;
+
+	uint8_t	reserved[4];
 
 	/** The bdev descriptor that was used when submitting this I/O. */
 	struct spdk_bdev_desc *desc;

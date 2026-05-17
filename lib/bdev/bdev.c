@@ -186,6 +186,53 @@ struct spdk_bdev_qos_limit {
 	void (*rewind_quota)(struct spdk_bdev_qos_limit *limit, struct spdk_bdev_io *io);
 };
 
+/** AI-QoS: adaptive policy configuration */
+struct spdk_bdev_qos_adaptive_cfg {
+	bool		enabled;
+	uint32_t	check_interval_us;		/* default 100ms */
+
+	/* Thresholds */
+	uint64_t	disk_lat_yellow_ticks;		/* 100us */
+	uint64_t	disk_lat_red_ticks;		/* 500us */
+	float		mem_pressure_yellow;		/* 0.70 */
+	float		mem_pressure_red;		/* 0.90 */
+	uint32_t	queue_depth_yellow;		/* 128 */
+	uint32_t	queue_depth_red;		/* 512 */
+	uint64_t	queue_wait_yellow_ticks;	/* 200us */
+	uint64_t	queue_wait_red_ticks;		/* 1ms */
+
+	/* Multipliers (applied to base limits) */
+	float		yellow_mult;			/* 0.75 */
+	float		red_mult;			/* 0.30 */
+};
+
+/** AI-QoS: urgent I/O configuration */
+struct spdk_bdev_qos_urgent_cfg {
+	bool		enabled;
+	uint64_t	token_hash;			/* stored token hash for verification */
+	uint64_t	token_expiry;			/* token expiry tsc ticks */
+	uint32_t	max_urgent_per_timeslice;	/* max urgent IOs per 1ms timeslice */
+	uint64_t	max_urgent_bytes_per_ts;	/* max urgent bytes per timeslice */
+	uint32_t	max_urgent_per_sec;		/* max urgent IOs per second */
+};
+
+/** AI-QoS: condition snapshot from monitoring */
+struct spdk_bdev_qos_cond_snapshot {
+	/* Disk */
+	uint64_t	disk_latency_p99_ticks;
+	uint32_t	disk_queue_depth;
+	/* Memory */
+	uint64_t	mem_pool_free_cnt;		/* free items in bdev_io_pool */
+	uint64_t	mem_pool_total_cnt;
+	/* Queue */
+	uint32_t	qos_queue_depth;		/* total queued across all channels */
+	uint64_t	qos_queue_oldest_wait_ticks;
+	/* Aggregate levels */
+	enum spdk_bdev_qos_cond_level disk_level;
+	enum spdk_bdev_qos_cond_level mem_level;
+	enum spdk_bdev_qos_cond_level queue_level;
+};
+
 struct spdk_bdev_qos {
 	/** Types of structure of rate limits. */
 	struct spdk_bdev_qos_limit rate_limits[SPDK_BDEV_QOS_NUM_RATE_LIMIT_TYPES];
@@ -204,6 +251,41 @@ struct spdk_bdev_qos {
 
 	/** Poller that processes queued I/O commands each time slice. */
 	struct spdk_poller *poller;
+
+	/* === AI-QoS fields === */
+
+	/** AI-QoS master enable flag */
+	bool				ai_qos_enabled;
+
+	/** Adaptive policy configuration */
+	struct spdk_bdev_qos_adaptive_cfg	adaptive_cfg;
+
+	/** Latest condition snapshot */
+	struct spdk_bdev_qos_cond_snapshot	cond_snap;
+
+	/** Condition monitoring poller */
+	struct spdk_poller			*cond_poller;
+
+	/** Base rate limits (before adaptive adjustment) */
+	uint64_t				base_limits[SPDK_BDEV_QOS_NUM_RATE_LIMIT_TYPES];
+
+	/** Urgent I/O configuration */
+	struct spdk_bdev_qos_urgent_cfg		urgent_cfg;
+
+	/** Urgent IO counter for current timeslice */
+	int32_t					urgent_count_this_ts;
+
+	/** Urgent byte counter for current timeslice */
+	uint64_t				urgent_bytes_this_ts;
+
+	/** Timestamp when urgent per-second tracking started */
+	uint64_t				urgent_sec_start_ticks;
+
+	/** Urgent IOs submitted this second */
+	int32_t					urgent_count_this_sec;
+
+	/** Urgent IO priority queue (drained before normal qos queue) */
+	TAILQ_HEAD(, spdk_bdev_io)		urgent_queued_io;
 };
 
 struct spdk_bdev_mgmt_channel {
@@ -269,6 +351,7 @@ struct spdk_bdev_shared_resource {
 
 #define BDEV_CH_RESET_IN_PROGRESS	(1 << 0)
 #define BDEV_CH_QOS_ENABLED		(1 << 1)
+#define BDEV_CH_AI_QOS_ENABLED		(1 << 2)
 
 struct spdk_bdev_channel {
 	struct spdk_bdev	*bdev;
@@ -10142,6 +10225,23 @@ spdk_bdev_set_qos_rate_limits(struct spdk_bdev *bdev, uint64_t *limits,
 				bdev_set_qos_limit_done(ctx, -ENOMEM);
 				return;
 			}
+
+			/* Initialize AI-QOS adaptive defaults */
+			{
+				struct spdk_bdev_qos_adaptive_cfg *acfg = &bdev->internal.qos->adaptive_cfg;
+				acfg->check_interval_us = 100000; /* 100ms */
+				acfg->disk_lat_yellow_ticks = 100 * spdk_get_ticks_hz() / 1000000; /* 100us */
+				acfg->disk_lat_red_ticks = 500 * spdk_get_ticks_hz() / 1000000;   /* 500us */
+				acfg->mem_pressure_yellow = 0.70f;
+				acfg->mem_pressure_red = 0.90f;
+				acfg->queue_depth_yellow = 128;
+				acfg->queue_depth_red = 512;
+				acfg->queue_wait_yellow_ticks = 200 * spdk_get_ticks_hz() / 1000000;  /* 200us */
+				acfg->queue_wait_red_ticks = 1000 * spdk_get_ticks_hz() / 1000000;    /* 1ms */
+				acfg->yellow_mult = 0.75f;
+				acfg->red_mult = 0.30f;
+			}
+			TAILQ_INIT(&bdev->internal.qos->urgent_queued_io);
 		}
 
 		if (bdev->internal.qos->thread == NULL) {
@@ -10172,6 +10272,115 @@ spdk_bdev_set_qos_rate_limits(struct spdk_bdev *bdev, uint64_t *limits,
 	}
 
 	spdk_spin_unlock(&bdev->internal.spinlock);
+}
+
+void
+spdk_bdev_set_ai_qos_policy(struct spdk_bdev *bdev, bool enabled,
+			    uint32_t check_interval_us,
+			    void (*cb_fn)(void *cb_arg, int status), void *cb_arg)
+{
+	struct spdk_bdev_qos *qos = bdev->internal.qos;
+
+	if (qos == NULL) {
+		if (cb_fn) {
+			cb_fn(cb_arg, -ENODEV);
+		}
+		return;
+	}
+
+	spdk_spin_lock(&bdev->internal.spinlock);
+	if (bdev->internal.qos_mod_in_progress) {
+		spdk_spin_unlock(&bdev->internal.spinlock);
+		if (cb_fn) {
+			cb_fn(cb_arg, -EAGAIN);
+		}
+		return;
+	}
+	bdev->internal.qos_mod_in_progress = true;
+	spdk_spin_unlock(&bdev->internal.spinlock);
+
+	qos->ai_qos_enabled = enabled;
+	qos->adaptive_cfg.enabled = enabled;
+	if (check_interval_us > 0) {
+		qos->adaptive_cfg.check_interval_us = check_interval_us;
+	}
+
+	spdk_spin_lock(&bdev->internal.spinlock);
+	bdev->internal.qos_mod_in_progress = false;
+	spdk_spin_unlock(&bdev->internal.spinlock);
+	if (cb_fn) {
+		cb_fn(cb_arg, 0);
+	}
+}
+
+void
+spdk_bdev_set_urgent_config(struct spdk_bdev *bdev, bool enabled,
+			    uint64_t token, uint64_t expiry_ticks,
+			    uint32_t max_burst_ios_per_ts,
+			    uint64_t max_burst_bytes_per_ts,
+			    void (*cb_fn)(void *cb_arg, int status), void *cb_arg)
+{
+	struct spdk_bdev_qos *qos = bdev->internal.qos;
+
+	if (qos == NULL) {
+		if (cb_fn) {
+			cb_fn(cb_arg, -ENODEV);
+		}
+		return;
+	}
+
+	spdk_spin_lock(&bdev->internal.spinlock);
+	if (bdev->internal.qos_mod_in_progress) {
+		spdk_spin_unlock(&bdev->internal.spinlock);
+		if (cb_fn) {
+			cb_fn(cb_arg, -EAGAIN);
+		}
+		return;
+	}
+	bdev->internal.qos_mod_in_progress = true;
+	spdk_spin_unlock(&bdev->internal.spinlock);
+
+	qos->urgent_cfg.enabled = enabled;
+	qos->urgent_cfg.token_hash = token ^ 0xA5A5A5A5A5A5A5A5ULL;
+	qos->urgent_cfg.token_expiry = expiry_ticks;
+	if (max_burst_ios_per_ts > 0) {
+		qos->urgent_cfg.max_urgent_per_timeslice = max_burst_ios_per_ts;
+	}
+	if (max_burst_bytes_per_ts > 0) {
+		qos->urgent_cfg.max_urgent_bytes_per_ts = max_burst_bytes_per_ts;
+	}
+
+	spdk_spin_lock(&bdev->internal.spinlock);
+	bdev->internal.qos_mod_in_progress = false;
+	spdk_spin_unlock(&bdev->internal.spinlock);
+	if (cb_fn) {
+		cb_fn(cb_arg, 0);
+	}
+}
+
+int
+spdk_bdev_get_qos_conditions(struct spdk_bdev *bdev,
+			     enum spdk_bdev_qos_cond_level *cond_level)
+{
+	struct spdk_bdev_qos *qos = bdev->internal.qos;
+
+	if (qos == NULL || cond_level == NULL) {
+		return -EINVAL;
+	}
+
+	if (!qos->ai_qos_enabled) {
+		return -ENOTSUP;
+	}
+
+	*cond_level = qos->cond_snap.disk_level;
+	if (qos->cond_snap.mem_level > *cond_level) {
+		*cond_level = qos->cond_snap.mem_level;
+	}
+	if (qos->cond_snap.queue_level > *cond_level) {
+		*cond_level = qos->cond_snap.queue_level;
+	}
+
+	return 0;
 }
 
 struct spdk_bdev_histogram_ctx {

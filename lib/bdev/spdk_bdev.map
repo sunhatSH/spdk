@@ -35,6 +35,9 @@
 	spdk_bdev_get_qos_rpc_type;
 	spdk_bdev_get_qos_rate_limits;
 	spdk_bdev_set_qos_rate_limits;
+	spdk_bdev_set_ai_qos_policy;
+	spdk_bdev_set_urgent_config;
+	spdk_bdev_get_qos_conditions;
 	spdk_bdev_get_buf_align;
 	spdk_bdev_get_optimal_io_boundary;
 	spdk_bdev_has_write_cache;
