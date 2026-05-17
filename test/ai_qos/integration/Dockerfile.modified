@@ -1,0 +1,40 @@
+# SPDK AI-QoS Modified (current ai-qos-v1 branch)
+# Build: docker build -t spdk-aiqos-modified -f test/ai_qos/integration/Dockerfile.modified .
+# Context: SPDK root, needs spdk-modified.tar.gz present there
+
+FROM ubuntu:22.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update -qq && \
+    apt-get install -y -qq \
+        gcc g++ make meson ninja-build pkg-config \
+        libssl-dev libaio-dev libudev-dev \
+        libjson-c-dev libkeyutils-dev \
+        libnuma-dev python3 python3-pip \
+        uuid-dev nasm curl python3-pyelftools \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+ADD spdk-modified.tar.gz /spdk
+WORKDIR /spdk
+
+RUN ./configure --without-rdma --without-vfio-user --without-vhost \
+    && make -j$(nproc) 2>&1 | tail -5
+
+# Build test programs
+COPY test/ai_qos/integration/ai_qos_bench.c test/ai_qos/integration/Makefile /tmp/integration/
+RUN cd /tmp/integration && make -j$(nproc) 2>&1 | tail -3 && cp ai_qos_bench /spdk/
+
+FROM ubuntu:22.04
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update -qq && \
+    apt-get install -y -qq \
+        libaio1 libjson-c5 libnuma1 libssl3 \
+        python3 python3-pip python3-matplotlib python3-numpy python3-pil \
+        uuid-runtime python3-jinja2 \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /spdk /spdk
+COPY --from=builder /tmp/integration /spdk/test/ai_qos/integration
+WORKDIR /spdk
